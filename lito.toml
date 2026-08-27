@@ -4,8 +4,8 @@ version = "0.1.0"
 
 [lib]
 name = "licrypto"
-module = "lito.crypto"
-archive = "lito.crypto"
+module = "licrypto"
+archive = "licrypto"
 sources = ["src/lib.cppm"]
 
 [[test]]

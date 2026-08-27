@@ -3,14 +3,14 @@ module;
 #include <cstdint>
 #include <rstd/enum.hpp>
 
-export module lito.crypto;
+export module licrypto;
 
 import rstd;
 
 using namespace rstd::prelude;
 using ::alloc::string::String;
 
-export namespace lito::crypto {
+export namespace licrypto {
 
 class Sha256DigestParseError {
   RSTD_ENUM(Sha256DigestParseError, (Length, (usize actual;)),
@@ -249,32 +249,30 @@ auto sha256_digest(ref<str> input) noexcept -> Sha256Digest {
   return sha256_digest(input.as_bytes());
 }
 
-} // namespace lito::crypto
+} // namespace licrypto
 
 export namespace rstd {
 
-template <> struct Impl<str_::FromStr, lito::crypto::Sha256Digest> {
-  using Err = lito::crypto::Sha256DigestParseError;
+template <> struct Impl<str_::FromStr, licrypto::Sha256Digest> {
+  using Err = licrypto::Sha256DigestParseError;
 
-  static auto from_str(ref<str> value)
-      -> Result<lito::crypto::Sha256Digest, Err> {
-    return lito::crypto::Sha256Digest::parse_hex(value);
+  static auto from_str(ref<str> value) -> Result<licrypto::Sha256Digest, Err> {
+    return licrypto::Sha256Digest::parse_hex(value);
   }
 };
 
-template <>
-struct Impl<convert::TryFrom<ref<str>>, lito::crypto::Sha256Digest> {
-  using Error = lito::crypto::Sha256DigestParseError;
+template <> struct Impl<convert::TryFrom<ref<str>>, licrypto::Sha256Digest> {
+  using Error = licrypto::Sha256DigestParseError;
 
   static auto try_from(ref<str> value)
-      -> Result<lito::crypto::Sha256Digest, Error> {
-    return rstd::from_str<lito::crypto::Sha256Digest>(value);
+      -> Result<licrypto::Sha256Digest, Error> {
+    return rstd::from_str<licrypto::Sha256Digest>(value);
   }
 };
 
 template <>
-struct Impl<fmt::Display, lito::crypto::Sha256Digest>
-    : ImplBase<lito::crypto::Sha256Digest> {
+struct Impl<fmt::Display, licrypto::Sha256Digest>
+    : ImplBase<licrypto::Sha256Digest> {
   auto fmt(fmt::Formatter &formatter) const -> bool {
     static constexpr char digits[] = "0123456789abcdef";
     for (const auto value : this->self().as_bytes()) {
@@ -288,16 +286,16 @@ struct Impl<fmt::Display, lito::crypto::Sha256Digest>
 };
 
 template <>
-struct Impl<fmt::Debug, lito::crypto::Sha256Digest>
-    : ImplBase<lito::crypto::Sha256Digest> {
+struct Impl<fmt::Debug, licrypto::Sha256Digest>
+    : ImplBase<licrypto::Sha256Digest> {
   auto fmt(fmt::Formatter &formatter) const -> bool {
     return as<fmt::Display>(this->self()).fmt(formatter);
   }
 };
 
 template <>
-struct Impl<fmt::Display, lito::crypto::Sha256DigestParseError>
-    : ImplBase<lito::crypto::Sha256DigestParseError> {
+struct Impl<fmt::Display, licrypto::Sha256DigestParseError>
+    : ImplBase<licrypto::Sha256DigestParseError> {
   auto fmt(fmt::Formatter &formatter) const -> bool {
     const auto &error = this->self();
     if (error.is_Length()) {
@@ -312,20 +310,20 @@ struct Impl<fmt::Display, lito::crypto::Sha256DigestParseError>
 };
 
 template <>
-struct Impl<fmt::Debug, lito::crypto::Sha256DigestParseError>
-    : ImplBase<lito::crypto::Sha256DigestParseError> {
+struct Impl<fmt::Debug, licrypto::Sha256DigestParseError>
+    : ImplBase<licrypto::Sha256DigestParseError> {
   auto fmt(fmt::Formatter &formatter) const -> bool {
     return as<fmt::Display>(this->self()).fmt(formatter);
   }
 };
 
 template <>
-struct Impl<error::Error, lito::crypto::Sha256DigestParseError>
-    : DefaultInImpl<error::Error, lito::crypto::Sha256DigestParseError> {};
+struct Impl<error::Error, licrypto::Sha256DigestParseError>
+    : DefaultInImpl<error::Error, licrypto::Sha256DigestParseError> {};
 
 template <>
-struct Impl<hash::Hash, lito::crypto::Sha256Digest>
-    : ImplBase<lito::crypto::Sha256Digest> {
+struct Impl<hash::Hash, licrypto::Sha256Digest>
+    : ImplBase<licrypto::Sha256Digest> {
   template <typename H>
     requires Impled<H, hash::Hasher>
   void hash(H &state) const noexcept {
