@@ -48,5 +48,8 @@ target_sources(
          TYPE
          CXX_MODULES
          FILES
-         src/lib.cppm)
+         src/base64.cppm
+         src/lib.cppm
+         src/sha256.cppm
+         src/sha512.cppm)
 target_link_libraries(licrypto PUBLIC rstd.std)

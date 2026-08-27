@@ -6,11 +6,11 @@ version = "0.1.0"
 name = "licrypto"
 module = "licrypto"
 archive = "licrypto"
-sources = ["src/lib.cppm"]
+sources = ["src/base64.cppm", "src/lib.cppm", "src/sha256.cppm", "src/sha512.cppm"]
 
 [[test]]
 name = "licrypto-tests"
-sources = ["tests/main.cpp", "tests/sha256.cpp"]
+sources = ["tests/base64.cpp", "tests/main.cpp", "tests/sha256.cpp", "tests/sha512.cpp"]
 
 [profile]
 exceptions = false
