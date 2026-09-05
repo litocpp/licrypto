@@ -16,9 +16,8 @@ sources = ["tests/base64.cpp", "tests/main.cpp", "tests/sha256.cpp", "tests/sha5
 exceptions = false
 rtti = false
 
-[dependencies.rstd-std]
-git = "https://github.com/litocpp/rstd.git"
-visibility = "public"
+[dependencies]
+rstd-std = { version = "0.1.0", visibility = "public" }
 
-[dev-dependencies.rstd-test]
-git = "https://github.com/litocpp/rstd.git"
+[dev-dependencies]
+rstd-test = { version = "0.1.0" }
