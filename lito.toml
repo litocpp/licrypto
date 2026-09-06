@@ -17,7 +17,7 @@ exceptions = false
 rtti = false
 
 [dependencies]
-rstd-std = { version = "0.1.0", visibility = "public" }
+rstd-std = { version = "0.1.0", pub = true }
 
 [dev-dependencies]
 rstd-test = { version = "0.1.0" }
