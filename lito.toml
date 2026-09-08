@@ -6,7 +6,6 @@ version = "0.1.0"
 name = "licrypto"
 module = "licrypto"
 archive = "licrypto"
-sources = ["src/base64.cppm", "src/lib.cppm", "src/sha256.cppm", "src/sha512.cppm"]
 
 [[test]]
 name = "licrypto-tests"
