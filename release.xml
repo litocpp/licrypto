@@ -1,2 +1,9 @@
+<release version="0.1.1" date="2026-09-24">
+  <description>
+    <ul>
+      <li>Add Sha1 and sha1_hex for compatibility use.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.1.0" date="2026-09-24">
 </release>
