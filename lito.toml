@@ -11,7 +11,7 @@ archive = "licrypto"
 
 [[test]]
 name = "licrypto-tests"
-sources = ["tests/base64.cpp", "tests/main.cpp", "tests/sha1.cpp", "tests/sha256.cpp", "tests/sha512.cpp"]
+sources = ["tests/base64.cpp", "tests/main.cpp", "tests/sha1.cpp", "tests/sha256.cpp", "tests/sha512.cpp", "tests/hmac_sha256.cpp"]
 
 [profile]
 exceptions = false
