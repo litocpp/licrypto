@@ -51,6 +51,7 @@ target_sources(
          src/base64.cppm
          src/hmac_sha256.cppm
          src/lib.cppm
+         src/md5.cppm
          src/sha1.cppm
          src/sha256.cppm
          src/sha512.cppm)
