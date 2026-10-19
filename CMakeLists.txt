@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.29)
 
 project(
   licrypto
-  VERSION 0.1.1
+  VERSION 0.1.2
   DESCRIPTION "Cryptographic primitives for lito projects"
   LANGUAGES CXX)
 
