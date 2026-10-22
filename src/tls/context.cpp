@@ -35,6 +35,10 @@ auto Context::maximum_plaintext() const -> usize {
 }
 
 auto ServerName::dns(ref<str> name) -> CryptoResult<ServerName> {
+  if (rstd::net::Ipv4Addr::parse(name).is_ok() ||
+      rstd::net::Ipv6Addr::parse(name).is_ok())
+    return Err(
+        Error::Configuration("IP identities require ServerName::ip"_Str));
   if (name.is_empty() || name.len() > usize(253))
     return Err(Error::Configuration("invalid TLS DNS name length"_Str));
   usize label{};

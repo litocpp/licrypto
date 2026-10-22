@@ -29,6 +29,12 @@ class ServerName {
 
 public:
   static auto dns(ref<str> name) -> CryptoResult<ServerName>;
+  auto clone() const -> ServerName {
+    ServerName result(value_.clone(), ip_);
+    result.address_ = address_;
+    result.address_length_ = address_length_;
+    return result;
+  }
   static auto ip(rstd::net::Ipv4Addr address) -> ServerName;
   auto dns_name() const -> Option<ref<str>> {
     return ip_ ? None<ref<str>>() : Some(value_.as_str());

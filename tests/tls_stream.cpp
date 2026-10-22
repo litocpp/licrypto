@@ -343,4 +343,29 @@ TEST(TlsStream, CanceledFlushReleasesDirectionAndEmptySendCompletes) {
             "firstsecond"_bytes);
   close_pair(runtime, rstd::move(streams));
 }
+TEST(TlsStream, CloseConsumesUnreadPeerRecordsBeforeCloseNotify) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto streams = pair(runtime, usize(64));
+  auto payload = Vec<u8>::make();
+  payload.resize(usize(35000), u8(42));
+  EXPECT_TRUE(runtime
+                  .block_on(streams.get<1>().send_all(
+                      Bytes::from_vec(rstd::move(payload))))
+                  .is_ok());
+  EXPECT_TRUE(runtime.block_on(streams.get<1>().flush()).is_ok());
+  close_pair(runtime, rstd::move(streams));
+}
+TEST(TlsStream, CloseAfterFailedReadReportsTheCompletedResourceRelease) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto client = [&] {
+    auto streams = pair(runtime);
+    return rstd::move(streams.get<0>());
+  }();
+  auto read = runtime.block_on(client.recv());
+  ASSERT_TRUE(read.is_err());
+  EXPECT_TRUE(read.unwrap_err().is_UnexpectedEof());
+  EXPECT_TRUE(runtime.block_on(rstd::move(client).close()).is_ok());
+}
 #endif

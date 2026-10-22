@@ -136,6 +136,24 @@ TEST(TlsSession, IpSanAndOwnedContextLifetime) {
   }();
   EXPECT_TRUE(negotiate(client, server).is_ok());
 }
+TEST(TlsSession, ClonedIdentitiesAuthenticateIndependentSessions) {
+  auto identity = test_identity();
+  auto server_context = Context::server(identity).unwrap();
+  auto client_context = Context::client(test_trust()).unwrap();
+  auto name = ServerName::dns("localhost"_str).unwrap();
+  auto address = ServerName::ip(rstd::net::Ipv4Addr::loopback());
+  for (unsigned i = 0; i < 2; ++i) {
+    auto server = Session::server(server_context).unwrap();
+    auto client =
+        Session::client(client_context, i ? address.clone() : name.clone())
+            .unwrap();
+    EXPECT_TRUE(negotiate(client, server).is_ok());
+  }
+  EXPECT_EQ(name.dns_name().unwrap(), "localhost"_str);
+  EXPECT_TRUE(address.is_ip());
+  EXPECT_TRUE(ServerName::dns("127.0.0.1"_str).is_err());
+  EXPECT_TRUE(ServerName::dns("::1"_str).is_err());
+}
 TEST(TlsSession, RejectsUnknownCaWrongNameAndExpiredCertificate) {
   for (unsigned scenario = 0; scenario < 3; ++scenario) {
     auto trust = test_trust();

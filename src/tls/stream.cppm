@@ -33,6 +33,8 @@ public:
   auto send_all(rstd::bytes::Bytes input) const
       -> rstd::async::coro<CryptoResult<usize>>;
   auto flush() const -> rstd::async::coro<CryptoResult<empty>>;
+  // Drains trailing input through close_notify and waits for native release.
+  // An earlier operation error is not replayed as a release failure.
   auto close() && -> rstd::async::coro<CryptoResult<empty>>;
   auto application_protocol() const -> CryptoResult<rstd::bytes::Bytes>;
   auto negotiated_version() const -> CryptoResult<Version>;

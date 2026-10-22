@@ -78,6 +78,7 @@ struct Commands {
   Arc<SimpleRequest> handshake;
   Option<rstd::task::Waker> driver_waker;
   Option<Error> error;
+  Option<Error> close_error;
   Bytes protocol;
   Version version = Version::Tls12;
   bool ready = false;
@@ -195,8 +196,14 @@ class ConnectionDriver {
     closing_transport_ = Some(rstd::move(transport_).close().into_future());
   }
   auto finish(rstd::io::Result<empty> closed) -> rstd::task::Poll<empty> {
-    if (closed.is_err() && !error_)
-      fail(Error::Io(rstd::move(closed).unwrap_err()));
+    Option<Error> close_error;
+    if (closed.is_err()) {
+      close_error = Some(Error::Io(rstd::move(closed).unwrap_err()));
+      if (!error_)
+        fail(close_error->clone());
+    } else if (closing_ && error_) {
+      close_error = Some(error_->clone());
+    }
     Option<Arc<ReadRequest>> read;
     Option<Arc<WriteRequest>> write;
     Option<Arc<SimpleRequest>> flush, close;
@@ -209,6 +216,8 @@ class ConnectionDriver {
       state->closed = true;
       if (error_)
         state->error = Some(error_->clone());
+      if (close_error)
+        state->close_error = Some(close_error->clone());
       state->driver_waker = None();
       read = state->read.take();
       write = state->write.take();
@@ -223,8 +232,9 @@ class ConnectionDriver {
     if (flush)
       (*flush)->complete(Err(error_ ? error_->clone() : Error::Closed()));
     if (close)
-      (*close)->complete(error_ ? CryptoResult<empty>(Err(error_->clone()))
-                                : CryptoResult<empty>(Ok(empty{})));
+      (*close)->complete(close_error
+                             ? CryptoResult<empty>(Err(close_error->clone()))
+                             : CryptoResult<empty>(Ok(empty{})));
     return rstd::task::Poll<empty>::Ready(empty{});
   }
   void clear_read(const Arc<ReadRequest> &request) {
@@ -470,12 +480,27 @@ class ConnectionDriver {
           changed = true;
         }
         if (closing_ && !write) {
-          auto closed = session_.shutdown();
-          if (closed.is_err()) {
-            fail(rstd::move(closed).unwrap_err());
-            continue;
+          auto progress = session_.progress();
+          if (progress.local_closed && !progress.peer_closed) {
+            // OpenSSL requires pending application records to be read before
+            // completing the peer's close_notify exchange.
+            auto trailing = session_.read(options_.maximum_buffered_plaintext);
+            if (trailing.is_err()) {
+              fail(rstd::move(trailing).unwrap_err());
+              continue;
+            }
+            if (trailing->is_some())
+              changed = true;
+            progress = session_.progress();
           }
-          tls_closed_ = *closed;
+          if (!progress.local_closed || progress.peer_closed) {
+            auto closed = session_.shutdown();
+            if (closed.is_err()) {
+              fail(rstd::move(closed).unwrap_err());
+              continue;
+            }
+            tls_closed_ = *closed;
+          }
         }
       }
       auto progress = session_.progress();
@@ -683,8 +708,9 @@ auto Stream::close() && -> rstd::async::coro<CryptoResult<empty>> {
     auto state = owner->shared->commands.lock().unwrap();
     if (state->closed)
       return ready_result<empty>(
-          state->error ? CryptoResult<empty>(Err(state->error->clone()))
-                       : CryptoResult<empty>(Ok(empty{})));
+          state->close_error
+              ? CryptoResult<empty>(Err(state->close_error->clone()))
+              : CryptoResult<empty>(Ok(empty{})));
     state->closing = true;
     state->close = Some(request.clone());
   }
