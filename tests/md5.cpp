@@ -21,20 +21,26 @@ TEST(Md5, PublishedVectorsAndIncremental) {
       {"12345678901234567890123456789012345678901234567890123456789012345678901234567890"_str,
        "57edf4a22be3c955ac49da2e2107b67a"_str}};
   for (const auto &vector : vectors) {
-    EXPECT_EQ(licrypto::md5_hex(vector.input), vector.digest);
+    EXPECT_EQ(licrypto::md5_hex(vector.input).unwrap(), vector.digest);
     auto bytes = vector.input.as_bytes();
     for (usize split{}; split <= bytes.len(); ++split) {
-      auto state = licrypto::Md5::make();
-      state.update(slice<u8>::from_raw_parts(bytes.as_raw_ptr(), split));
-      state.update(slice<u8>::from_raw_parts(
-          bytes.as_raw_ptr() + split.to_primitive(), bytes.len() - split));
-      EXPECT_EQ(licrypto::md5_hex(rstd::move(state).finalize()), vector.digest);
+      auto state = licrypto::Md5::make().unwrap();
+      ASSERT_TRUE(
+          state.update(slice<u8>::from_raw_parts(bytes.as_raw_ptr(), split))
+              .is_ok());
+      ASSERT_TRUE(state
+                      .update(slice<u8>::from_raw_parts(
+                          bytes.as_raw_ptr() + split.to_primitive(),
+                          bytes.len() - split))
+                      .is_ok());
+      EXPECT_EQ(licrypto::md5_hex(rstd::move(state).finalize().unwrap()),
+                vector.digest);
     }
   }
 }
 
 TEST(Md5, BinaryAndPaddingBoundaries) {
-  EXPECT_EQ(licrypto::md5_hex("a\0b"_str),
+  EXPECT_EQ(licrypto::md5_hex("a\0b"_str).unwrap(),
             "70350f6027bce3713f6b76473084309b"_str);
   struct Vector {
     usize length;
@@ -51,11 +57,16 @@ TEST(Md5, BinaryAndPaddingBoundaries) {
     for (usize i{}; i < vector.length; ++i)
       bytes.push(u8(i.to_primitive()));
     for (usize split{}; split <= bytes.len(); ++split) {
-      auto state = licrypto::Md5::make();
-      state.update(slice<u8>::from_raw_parts(bytes.as_ptr(), split));
-      state.update(slice<u8>::from_raw_parts(
-          bytes.as_ptr() + split.to_primitive(), bytes.len() - split));
-      EXPECT_EQ(licrypto::md5_hex(rstd::move(state).finalize()), vector.digest);
+      auto state = licrypto::Md5::make().unwrap();
+      ASSERT_TRUE(state.update(slice<u8>::from_raw_parts(bytes.as_ptr(), split))
+                      .is_ok());
+      ASSERT_TRUE(
+          state
+              .update(slice<u8>::from_raw_parts(
+                  bytes.as_ptr() + split.to_primitive(), bytes.len() - split))
+              .is_ok());
+      EXPECT_EQ(licrypto::md5_hex(rstd::move(state).finalize().unwrap()),
+                vector.digest);
     }
   }
 }

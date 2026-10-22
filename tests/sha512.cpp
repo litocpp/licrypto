@@ -7,16 +7,17 @@ using namespace rstd::literals;
 
 TEST(Sha512, MatchesPublishedVectors) {
   EXPECT_EQ(
-      licrypto::sha512_hex(""_str).as_str(),
+      licrypto::sha512_hex(""_str).unwrap().as_str(),
       "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
       "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"_str);
   EXPECT_EQ(
-      licrypto::sha512_hex("abc"_str).as_str(),
+      licrypto::sha512_hex("abc"_str).unwrap().as_str(),
       "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2"
       "192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"_str);
   EXPECT_EQ(
       licrypto::sha512_hex(
           "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"_str)
+          .unwrap()
           .as_str(),
       "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c3359"
       "6fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445"_str);
@@ -25,18 +26,22 @@ TEST(Sha512, MatchesPublishedVectors) {
 TEST(Sha512, IncrementalMatchesOneShot) {
   constexpr auto input =
       "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"_str;
-  auto expected = licrypto::sha512_hex(input);
+  auto expected = licrypto::sha512_hex(input).unwrap();
 
   rstd::usize chunk_sizes[]{rstd::usize(1), rstd::usize(7), rstd::usize(128)};
   for (auto chunk_size : chunk_sizes) {
-    auto state = licrypto::Sha512::make();
+    auto state = licrypto::Sha512::make().unwrap();
     for (rstd::usize offset{}; offset < input.len(); offset += chunk_size) {
       auto remaining = input.len() - offset;
       auto count = remaining < chunk_size ? remaining : chunk_size;
-      state.update(rstd::slice<rstd::u8>::from_raw_parts(
-          input.as_bytes().as_raw_ptr() + offset.to_primitive(), count));
+      ASSERT_TRUE(
+          state
+              .update(rstd::slice<rstd::u8>::from_raw_parts(
+                  input.as_bytes().as_raw_ptr() + offset.to_primitive(), count))
+              .is_ok());
     }
-    EXPECT_EQ(licrypto::sha512_hex(rstd::move(state).finalize()), expected);
+    EXPECT_EQ(licrypto::sha512_hex(rstd::move(state).finalize().unwrap()),
+              expected);
   }
 }
 
@@ -47,13 +52,18 @@ TEST(Sha512, IncrementalCoversPaddingBoundaries) {
     auto input = rstd::vec::Vec<rstd::u8>::with_capacity(length);
     for (rstd::usize index{}; index < length; ++index)
       input.push(rstd::u8(index.to_primitive() & 0xffu));
-    auto state = licrypto::Sha512::make();
+    auto state = licrypto::Sha512::make().unwrap();
     auto split = length / rstd::usize(2);
-    state.update(rstd::slice<rstd::u8>::from_raw_parts(input.as_ptr(), split));
-    state.update(rstd::slice<rstd::u8>::from_raw_parts(
-        input.as_ptr() + split.to_primitive(), length - split));
-    EXPECT_EQ(licrypto::sha512_hex(rstd::move(state).finalize()),
-              licrypto::sha512_hex(input.as_slice()));
+    ASSERT_TRUE(state
+                    .update(rstd::slice<rstd::u8>::from_raw_parts(
+                        input.as_ptr(), split))
+                    .is_ok());
+    ASSERT_TRUE(state
+                    .update(rstd::slice<rstd::u8>::from_raw_parts(
+                        input.as_ptr() + split.to_primitive(), length - split))
+                    .is_ok());
+    EXPECT_EQ(licrypto::sha512_hex(rstd::move(state).finalize().unwrap()),
+              licrypto::sha512_hex(input.as_slice()).unwrap());
   }
 }
 
@@ -84,11 +94,11 @@ TEST(Sha512Digest, ParsesAndFormatsCanonicalHex) {
 }
 
 TEST(Sha512Digest, SupportsOneShotAndIncrementalHashing) {
-  auto one_shot = licrypto::sha512_digest("abc"_str);
-  auto state = licrypto::Sha512::make();
-  state.update("a"_str.as_bytes());
-  state.update("bc"_str.as_bytes());
-  auto incremental = rstd::move(state).finalize_digest();
+  auto one_shot = licrypto::sha512_digest("abc"_str).unwrap();
+  auto state = licrypto::Sha512::make().unwrap();
+  ASSERT_TRUE(state.update("a"_str.as_bytes()).is_ok());
+  ASSERT_TRUE(state.update("bc"_str.as_bytes()).is_ok());
+  auto incremental = rstd::move(state).finalize_digest().unwrap();
 
   EXPECT_EQ(one_shot, incremental);
   EXPECT_EQ(
