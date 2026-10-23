@@ -241,20 +241,25 @@ auto Session::write() -> CryptoResult<Option<usize>> {
   state->writing = None();
   return Ok(Some(usize(transferred)));
 }
-auto Session::shutdown() -> CryptoResult<bool> {
+auto Session::shutdown(CloseMode mode) -> CryptoResult<bool> {
   auto *state = static_cast<SessionState *>(state_);
   rstd_try(session_live(state, "TLS shutdown"_str));
   if (!state->ready || state->writing)
     return Err(
         Error::InvalidState("TLS shutdown before pending write completes"_Str));
+  if (mode == CloseMode::SendOnly && state->shutdown_sent)
+    return Ok(true);
   state->needs_input = false;
   ERR_clear_error();
   auto rc = SSL_shutdown(state->ssl);
-  if (rc == 1)
+  if (rc == 1) {
+    state->shutdown_sent = true;
     return Ok(true);
+  }
   if (rc == 0) {
-    state->needs_input = true;
-    return Ok(false);
+    state->shutdown_sent = true;
+    state->needs_input = mode == CloseMode::WaitPeer;
+    return Ok(mode == CloseMode::SendOnly);
   }
   auto error = SSL_get_error(state->ssl, rc);
   if (ssl_pending(*state, error))
@@ -274,7 +279,7 @@ auto Session::progress() const -> Progress {
   auto shutdown = SSL_get_shutdown(state->ssl);
   return {state->ready,
           (shutdown & SSL_RECEIVED_SHUTDOWN) != 0,
-          (shutdown & SSL_SENT_SHUTDOWN) != 0,
+          state->shutdown_sent,
           state->needs_input,
           usize(BIO_ctrl_pending(state->io)),
           usize(BIO_ctrl_get_write_guarantee(state->io))};

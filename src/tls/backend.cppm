@@ -35,6 +35,8 @@ struct SessionState {
   bool ready = false;
   bool failed = false;
   bool needs_input = false;
+  // SSL_SENT_SHUTDOWN is set before a nonblocking alert write succeeds.
+  bool shutdown_sent = false;
   SessionState(rstd::sync::Arc<ContextState> context)
       : context(rstd::move(context)) {}
   ~SessionState();

@@ -23,7 +23,7 @@ public:
   auto read(usize maximum_size) -> CryptoResult<Option<rstd::bytes::Bytes>>;
   auto start_write(rstd::bytes::Bytes input) -> CryptoResult<empty>;
   auto write() -> CryptoResult<Option<usize>>;
-  auto shutdown() -> CryptoResult<bool>;
+  auto shutdown(CloseMode mode = CloseMode::WaitPeer) -> CryptoResult<bool>;
   auto transport_eof() -> CryptoResult<empty>;
   auto progress() const -> Progress;
   auto application_protocol() const -> CryptoResult<rstd::bytes::Bytes>;

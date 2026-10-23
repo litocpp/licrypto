@@ -136,6 +136,40 @@ TEST(TlsSession, IpSanAndOwnedContextLifetime) {
   }();
   EXPECT_TRUE(negotiate(client, server).is_ok());
 }
+TEST(TlsSession, SendOnlyShutdownRetriesPartialAlertWithoutPeerReply) {
+  for (auto version : array<Version, 2>{Version::Tls12, Version::Tls13}) {
+    Parameters a, b;
+    a.minimum = a.maximum = b.minimum = b.maximum = version;
+    a.bio_capacity = b.bio_capacity = usize(7);
+    auto client_context = Context::client(test_trust(), rstd::move(a)).unwrap();
+    auto identity = test_identity();
+    auto server_context = Context::server(identity, rstd::move(b)).unwrap();
+    auto client = Session::client(client_context,
+                                  ServerName::dns("localhost"_str).unwrap())
+                      .unwrap();
+    auto server = Session::server(server_context).unwrap();
+    ASSERT_TRUE(negotiate(client, server).is_ok());
+    EXPECT_FALSE(client.shutdown(CloseMode::SendOnly).unwrap());
+    EXPECT_FALSE(client.progress().local_closed);
+    bool finished = false;
+    for (unsigned i = 0; i < 1000; ++i) {
+      auto sent = client.shutdown(CloseMode::SendOnly);
+      ASSERT_TRUE(sent.is_ok());
+      ASSERT_TRUE(pump(client, server).is_ok());
+      auto read = server.read(usize(1));
+      ASSERT_TRUE(read.is_ok());
+      if (*sent && client.progress().pending_output == usize() &&
+          server.progress().peer_closed) {
+        finished = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(finished);
+    EXPECT_TRUE(client.progress().local_closed);
+    EXPECT_FALSE(client.progress().peer_closed);
+    EXPECT_TRUE(client.shutdown(CloseMode::SendOnly).unwrap());
+  }
+}
 TEST(TlsSession, ClonedIdentitiesAuthenticateIndependentSessions) {
   auto identity = test_identity();
   auto server_context = Context::server(identity).unwrap();

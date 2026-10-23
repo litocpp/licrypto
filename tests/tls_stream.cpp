@@ -28,10 +28,12 @@ auto tcp_pair(async::Runtime &runtime)
   return {rstd::move(client), rstd::move(accepted.get<0>())};
 }
 auto pair(async::Runtime &runtime, usize capacity = usize(64),
-          StreamOptions options = {}) -> tuple<Stream, Stream> {
+          StreamOptions options = {}, Version version = Version::Tls13)
+    -> tuple<Stream, Stream> {
   auto sockets = tcp_pair(runtime);
   auto pending = [&] {
     Parameters a, b;
+    a.minimum = a.maximum = b.minimum = b.maximum = version;
     a.bio_capacity = b.bio_capacity = capacity;
     auto identity =
         Identity::from_pem(
@@ -230,6 +232,60 @@ TEST(TlsStream, CloseTimeoutAndUnpolledReadCancellation) {
   auto result = runtime.block_on(rstd::move(streams.get<0>()).close());
   ASSERT_TRUE(result.is_err());
   EXPECT_TRUE(result.unwrap_err().is_Timeout());
+}
+
+TEST(TlsStream, SendOnlyCloseFlushesAlertWithoutPeerReply) {
+  for (auto version : array<Version, 2>{Version::Tls12, Version::Tls13}) {
+    auto runtime =
+        async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+    auto streams = pair(runtime, usize(7), {}, version);
+    auto pending = streams.get<0>().recv();
+    auto result = runtime.block_on(async::timeout(
+        async::into_future(
+            rstd::move(streams.get<0>()).close(CloseMode::SendOnly)),
+        time::Duration::from_millis(u64(100))));
+    ASSERT_TRUE(result.is_ok());
+    EXPECT_TRUE(result.unwrap().is_ok());
+    EXPECT_TRUE(runtime.block_on(rstd::move(pending)).is_err());
+    auto eof = runtime.block_on(streams.get<1>().recv());
+    ASSERT_TRUE(eof.is_ok());
+    EXPECT_TRUE(eof->is_empty());
+    (void)runtime.block_on(rstd::move(streams.get<1>()).close());
+  }
+}
+
+TEST(TlsStream, WaitPeerCloseFlushesPartialAlertsInBothDirections) {
+  for (auto version : array<Version, 2>{Version::Tls12, Version::Tls13}) {
+    auto runtime =
+        async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+    close_pair(runtime, pair(runtime, usize(7), {}, version));
+  }
+}
+
+TEST(TlsStream, SendOnlyClosePreservesPendingWriteBeforeAlert) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto streams = pair(runtime, usize(64));
+  auto payload = Vec<u8>::make();
+  payload.resize(usize(65537), u8(42));
+  auto data = Bytes::from_vec(rstd::move(payload));
+  auto sending = streams.get<0>().send_all(data.clone());
+  auto closing = rstd::move(streams.get<0>()).close(CloseMode::SendOnly);
+  auto read = runtime.spawn(consume(streams.get<1>(), data.len()));
+  auto result = runtime
+                    .block_on(async::timeout(
+                        async::join(async::into_future(rstd::move(sending)),
+                                    async::into_future(rstd::move(closing))),
+                        time::Duration::from_secs(u64(2))))
+                    .unwrap();
+  EXPECT_EQ(result.get<0>().unwrap(), data.len());
+  EXPECT_TRUE(result.get<1>().is_ok());
+  EXPECT_EQ(runtime.block_on(rstd::move(read)).unwrap().as_slice(),
+            data.as_slice());
+  auto eof = runtime.block_on(streams.get<1>().recv());
+  ASSERT_TRUE(eof.is_ok());
+  EXPECT_TRUE(eof->is_empty());
+  (void)runtime.block_on(rstd::move(streams.get<1>()).close());
 }
 
 TEST(TlsStream,

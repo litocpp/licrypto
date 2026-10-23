@@ -82,6 +82,7 @@ struct Commands {
   Bytes protocol;
   Version version = Version::Tls12;
   bool ready = false;
+  CloseMode close_mode = CloseMode::WaitPeer;
   bool closing = false;
   bool abort = false;
   bool closed = false;
@@ -179,6 +180,7 @@ class ConnectionDriver {
   Option<Arc<ReadRequest>> delivery_;
   usize delivered_{};
   bool ready_ = false;
+  CloseMode close_mode_ = CloseMode::WaitPeer;
   bool closing_ = false;
   bool tls_closed_ = false;
   bool transport_eof_ = false;
@@ -267,14 +269,18 @@ class ConnectionDriver {
     for (unsigned budget = 0; budget < 64; ++budget) {
       bool changed = false;
       bool abort = false;
+      bool discard_input = false;
       {
         auto state = shared_->commands.lock().unwrap();
         state->driver_waker = Some(cx.waker().clone());
         abort = state->abort;
         if (state->closing && !closing_) {
           closing_ = true;
+          close_mode_ = state->close_mode;
           deadline_ = Some(rstd::async::sleep(options_.close_timeout));
         }
+        discard_input = ready_ && closing_ &&
+                        close_mode_ == CloseMode::SendOnly && !state->write;
       }
       if (abort)
         fail(Error::Closed());
@@ -292,6 +298,10 @@ class ConnectionDriver {
         if (out.is_pending())
           return rstd::task::Poll<empty>::Pending();
         return finish(rstd::move(out).take());
+      }
+      if (discard_input) {
+        receiving_ = None();
+        input_ = {};
       }
       if (receiving_) {
         auto received = rstd::future::poll(*receiving_, cx);
@@ -423,7 +433,7 @@ class ConnectionDriver {
             }
           }
         }
-        if (read && !delivery_) {
+        if (read && !delivery_ && !discard_input) {
           if ((*read)->canceled())
             clear_read(*read);
           else {
@@ -481,7 +491,8 @@ class ConnectionDriver {
         }
         if (closing_ && !write) {
           auto progress = session_.progress();
-          if (progress.local_closed && !progress.peer_closed) {
+          if (close_mode_ == CloseMode::WaitPeer && progress.local_closed &&
+              !progress.peer_closed) {
             // OpenSSL requires pending application records to be read before
             // completing the peer's close_notify exchange.
             auto trailing = session_.read(options_.maximum_buffered_plaintext);
@@ -493,8 +504,9 @@ class ConnectionDriver {
               changed = true;
             progress = session_.progress();
           }
-          if (!progress.local_closed || progress.peer_closed) {
-            auto closed = session_.shutdown();
+          if (close_mode_ == CloseMode::SendOnly || !progress.local_closed ||
+              progress.peer_closed) {
+            auto closed = session_.shutdown(close_mode_);
             if (closed.is_err()) {
               fail(rstd::move(closed).unwrap_err());
               continue;
@@ -524,8 +536,9 @@ class ConnectionDriver {
         begin_transport_close();
         continue;
       }
-      if (progress.needs_input && !transport_eof_ && !receiving_ &&
-          input_.is_empty() && progress.input_capacity != usize()) {
+      if (!discard_input && progress.needs_input && !transport_eof_ &&
+          !receiving_ && input_.is_empty() &&
+          progress.input_capacity != usize()) {
         auto maximum = progress.input_capacity < usize(16384)
                            ? progress.input_capacity
                            : usize(16384);
@@ -699,7 +712,8 @@ auto Stream::flush() const -> rstd::async::coro<CryptoResult<empty>> {
   return await_request(
       WaitRequest<SimpleRequest>(owner_.clone(), rstd::move(request)));
 }
-auto Stream::close() && -> rstd::async::coro<CryptoResult<empty>> {
+auto Stream::close(
+    CloseMode mode) && -> rstd::async::coro<CryptoResult<empty>> {
   if (!owner_)
     return ready_result<empty>(Err(Error::Closed()));
   auto owner = rstd::move(owner_);
@@ -712,6 +726,7 @@ auto Stream::close() && -> rstd::async::coro<CryptoResult<empty>> {
               ? CryptoResult<empty>(Err(state->close_error->clone()))
               : CryptoResult<empty>(Ok(empty{})));
     state->closing = true;
+    state->close_mode = mode;
     state->close = Some(request.clone());
   }
   owner->shared->wake_driver();

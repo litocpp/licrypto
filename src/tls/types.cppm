@@ -5,6 +5,7 @@ export import rstd.net.socket_addr;
 using namespace rstd::prelude;
 export namespace licrypto::tls {
 enum class Version { Tls12, Tls13 };
+enum class CloseMode { WaitPeer, SendOnly };
 struct Parameters {
   Version minimum = Version::Tls12;
   Version maximum = Version::Tls13;
