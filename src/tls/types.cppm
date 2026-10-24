@@ -14,10 +14,12 @@ struct Parameters {
   usize maximum_certificate_bytes = usize(1048576);
   Vec<String> application_protocols;
   bool require_application_protocol = false;
+  bool verify_hostname = true;
 };
 struct Trust {
   bool use_system_roots = true;
   Vec<rstd::bytes::Bytes> ca_pem;
+  bool verify_peer = true;
 };
 class Session;
 class ServerName {

@@ -65,13 +65,13 @@ auto Session::client(const Context &context, ServerName name)
   auto &state = *static_cast<SessionState *>(session.state_);
   auto *parameters = SSL_get0_param(state.ssl);
   ERR_clear_error();
-  if (name.is_ip()) {
+  if (name.is_ip() && context.state_->parameters.verify_hostname) {
     if (X509_VERIFY_PARAM_set1_ip(parameters,
                                   reinterpret_cast<const unsigned char *>(
                                       name.address_.as_slice().as_raw_ptr()),
                                   name.address_length_.to_primitive()) != 1)
       return Err(backend::openssl_failure("X509_VERIFY_PARAM_set1_ip"_str));
-  } else {
+  } else if (!name.is_ip()) {
     auto encoded = rstd::ffi::CString::make(
         Vec<u8>::from(name.value_.as_str().as_bytes()));
     if (encoded.is_err())
@@ -79,7 +79,8 @@ auto Session::client(const Context &context, ServerName name)
     auto text = rstd::move(encoded).unwrap();
     X509_VERIFY_PARAM_set_hostflags(parameters,
                                     X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-    if (X509_VERIFY_PARAM_set1_host(parameters, text.as_ptr(), 0) != 1 ||
+    if ((context.state_->parameters.verify_hostname &&
+         X509_VERIFY_PARAM_set1_host(parameters, text.as_ptr(), 0) != 1) ||
         SSL_set_tlsext_host_name(state.ssl, text.as_ptr()) != 1)
       return Err(backend::openssl_failure("configure TLS peer name"_str));
   }

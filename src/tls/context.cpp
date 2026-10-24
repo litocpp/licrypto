@@ -224,9 +224,29 @@ auto make_context(Parameters parameters, bool client)
   }
   return Ok(rstd::move(state));
 }
-auto Context::client(Trust trust, Parameters parameters)
-    -> CryptoResult<Context> {
+auto install_identity(SSL_CTX *handle, const IdentityState &identity)
+    -> CryptoResult<empty> {
+  if (SSL_CTX_use_certificate(handle, identity.chain[usize()]) != 1 ||
+      SSL_CTX_use_PrivateKey(handle, identity.key) != 1 ||
+      SSL_CTX_check_private_key(handle) != 1)
+    return Err(backend::openssl_failure("SSL_CTX_use_identity"_str));
+  for (usize i(1); i < identity.chain.len(); ++i) {
+    if (SSL_CTX_add1_chain_cert(handle, identity.chain[i]) != 1)
+      return Err(backend::openssl_failure("SSL_CTX_add1_chain_cert"_str));
+  }
+  return Ok(empty{});
+}
+auto Context::client(Trust trust, Parameters parameters,
+                     const Identity *identity) -> CryptoResult<Context> {
+  if (!trust.verify_peer && parameters.verify_hostname)
+    return Err(Error::Configuration(
+        "hostname verification requires peer verification"_Str));
   auto state = rstd_try(make_context(rstd::move(parameters), true));
+  SSL_CTX_set_verify(state->handle,
+                     trust.verify_peer ? SSL_VERIFY_PEER : SSL_VERIFY_NONE,
+                     nullptr);
+  if (identity)
+    rstd_try(install_identity(state->handle, *identity->state_));
   if (trust.use_system_roots &&
       SSL_CTX_set_default_verify_paths(state->handle) != 1)
     return Err(
@@ -251,15 +271,7 @@ auto Context::client(Trust trust, Parameters parameters)
 auto Context::server(const Identity &identity, Parameters parameters)
     -> CryptoResult<Context> {
   auto state = rstd_try(make_context(rstd::move(parameters), false));
-  if (SSL_CTX_use_certificate(state->handle, identity.state_->chain[usize()]) !=
-          1 ||
-      SSL_CTX_use_PrivateKey(state->handle, identity.state_->key) != 1 ||
-      SSL_CTX_check_private_key(state->handle) != 1)
-    return Err(backend::openssl_failure("SSL_CTX_use_identity"_str));
-  for (usize i(1); i < identity.state_->chain.len(); ++i) {
-    if (SSL_CTX_add1_chain_cert(state->handle, identity.state_->chain[i]) != 1)
-      return Err(backend::openssl_failure("SSL_CTX_add1_chain_cert"_str));
-  }
+  rstd_try(install_identity(state->handle, *identity.state_));
   return Ok(Context(rstd::move(state)));
 }
 } // namespace licrypto::tls

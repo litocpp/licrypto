@@ -35,7 +35,8 @@ public:
   Context(Context &&) noexcept;
   auto operator=(Context &&) noexcept -> Context &;
   ~Context();
-  static auto client(Trust trust = {}, Parameters parameters = {})
+  static auto client(Trust trust = {}, Parameters parameters = {},
+                     const Identity *identity = nullptr)
       -> CryptoResult<Context>;
   static auto server(const Identity &identity, Parameters parameters = {})
       -> CryptoResult<Context>;
