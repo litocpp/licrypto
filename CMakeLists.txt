@@ -48,7 +48,15 @@ target_sources(
          TYPE
          CXX_MODULES
          FILES
+         src/backend/algorithm.cppm
+         src/backend/digest.cppm
+         src/backend/native.cppm
+         src/backend/native/md5.cppm
+         src/backend/native/sha1.cppm
+         src/backend/native/sha256.cppm
+         src/backend/native/sha512.cppm
          src/base64.cppm
+         src/error.cppm
          src/hmac_sha256.cppm
          src/lib.cppm
          src/md5.cppm
