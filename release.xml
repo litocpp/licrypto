@@ -1,3 +1,16 @@
+<release version="0.2.0" date="2026-10-30">
+  <description>
+    <ul>
+      <li>Add an optional OpenSSL backend.</li>
+      <li>Return CryptoResult from digest operations.</li>
+      <li>Add tls::Session and tls::Stream.</li>
+      <li>Support client identities and hostname verification options.</li>
+      <li>Add tls::CloseMode.</li>
+      <li>Fix TLS shutdown progress.</li>
+      <li>Update rstd to 0.1.10.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.1.2" date="2026-10-20">
   <description>
     <ul>
