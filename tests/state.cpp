@@ -24,6 +24,26 @@ TEST(CryptoState, MoveTransfersTheComputation) {
   auto digest = rstd::move(state).finalize_digest().unwrap();
   EXPECT_EQ(digest, licrypto::sha512_digest("abc"_str).unwrap());
 }
+TEST(CryptoState, Sha256MoveAssignmentTransfersTheComputation) {
+  auto source = licrypto::Sha256::make().unwrap();
+  auto target = licrypto::Sha256::make().unwrap();
+  ASSERT_TRUE(source.update("a"_str.as_bytes()).is_ok());
+  ASSERT_TRUE(target.update("discarded"_str.as_bytes()).is_ok());
+  target = rstd::move(source);
+  EXPECT_TRUE(source.update("wrong"_str.as_bytes()).is_err());
+  EXPECT_TRUE(rstd::move(source).finalize_digest().is_err());
+  auto *same = &target;
+  target = rstd::move(*same);
+  ASSERT_TRUE(target.update("bc"_str.as_bytes()).is_ok());
+  EXPECT_EQ(rstd::move(target).finalize_digest().unwrap(),
+            licrypto::sha256_digest("abc"_str).unwrap());
+  source = licrypto::Sha256::make().unwrap();
+  ASSERT_TRUE(source.update("replacement"_str.as_bytes()).is_ok());
+  target = rstd::move(source);
+  EXPECT_TRUE(source.update("wrong"_str.as_bytes()).is_err());
+  EXPECT_EQ(rstd::move(target).finalize_digest().unwrap(),
+            licrypto::sha256_digest("replacement"_str).unwrap());
+}
 TEST(CryptoState, EmptyHmacKeyAndMessage) {
   auto digest = licrypto::hmac_sha256(""_str.as_bytes(), ""_str.as_bytes());
   ASSERT_TRUE(digest.is_ok());

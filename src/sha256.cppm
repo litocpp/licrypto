@@ -91,7 +91,11 @@ public:
   Sha256(const Sha256 &) = delete;
   auto operator=(const Sha256 &) -> Sha256 & = delete;
   Sha256(Sha256 &&) noexcept = default;
-  auto operator=(Sha256 &&) noexcept -> Sha256 & = default;
+  auto operator=(Sha256 &&other) noexcept -> Sha256 & {
+    if (this != &other)
+      state_ = rstd::move(other.state_);
+    return *this;
+  }
   static auto make() -> CryptoResult<Sha256> {
     auto state = rstd_try(
         (backend::DigestState<backend::Algorithm::Sha256, 32>::make()));
