@@ -1,6 +1,6 @@
 [package]
 name = "licrypto"
-version = "0.2.0"
+version = "0.2.1"
 license = "MIT OR Apache-2.0"
 authors = ["hypengw <hypengwip@gmail.com>"]
 
@@ -11,7 +11,7 @@ archive = "licrypto"
 
 [[test]]
 name = "licrypto-tests"
-sources = ["tests/base64.cpp", "tests/main.cpp", "tests/md5.cpp", "tests/sha1.cpp", "tests/sha256.cpp", "tests/sha512.cpp", "tests/hmac_sha256.cpp", "tests/state.cpp", "tests/tls_session.cpp", "tests/tls_stream.cpp"]
+sources = ["tests/base64.cpp", "tests/main.cpp", "tests/md5.cpp", "tests/sha1.cpp", "tests/sha256.cpp", "tests/sha512.cpp", "tests/hmac_sha256.cpp", "tests/state.cpp", "tests/tls_session.cpp", "tests/tls_stream.cpp", "tests/checksum.cpp"]
 
 [profile.base]
 exceptions = false
