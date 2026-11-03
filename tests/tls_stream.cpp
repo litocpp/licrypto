@@ -9,7 +9,38 @@ using namespace rstd::literals;
 using bytes::Bytes;
 using namespace licrypto;
 using namespace licrypto::tls;
+
+struct FragmentedTlsTransport {
+  rstd::async::io::Stream stream;
+};
+template <>
+struct rstd::Impl<rstd::async::io::CompletionStream, FragmentedTlsTransport>
+    : rstd::ImplBase<FragmentedTlsTransport> {
+  auto recv_into(bytes::BytesMut buffer) const
+      -> async::coro<async::io::StreamReceive> {
+    return self().stream.recv_into(rstd::move(buffer));
+  }
+  auto send(Bytes input) const -> async::coro<rstd::io::Result<usize>> {
+    auto count = input.len() < usize(13) ? input.len() : usize(13);
+    return self().stream.send(input.slice(usize(), count));
+  }
+  auto flush() const -> async::coro<rstd::io::Result<empty>> {
+    return self().stream.flush();
+  }
+  auto shutdown_write() const -> async::coro<rstd::io::Result<empty>> {
+    return self().stream.shutdown_write();
+  }
+  void request_stop() const { self().stream.request_stop(); }
+  auto close() const -> async::coro<rstd::io::Result<empty>> {
+    return self().stream.close();
+  }
+};
 namespace {
+auto fragmented(net::TcpStream transport) -> rstd::async::io::Stream {
+  auto backend = sync::Arc<rstd::dyn<async::io::CompletionStream>>::make(
+      FragmentedTlsTransport{net::as_stream(rstd::move(transport)).unwrap()});
+  return async::io::Stream(rstd::move(backend));
+}
 auto trust() -> Trust {
   Trust value;
   value.use_system_roots = false;
@@ -28,8 +59,8 @@ auto tcp_pair(async::Runtime &runtime)
   return {rstd::move(client), rstd::move(accepted.get<0>())};
 }
 auto pair(async::Runtime &runtime, usize capacity = usize(64),
-          StreamOptions options = {}, Version version = Version::Tls13)
-    -> tuple<Stream, Stream> {
+          StreamOptions options = {}, Version version = Version::Tls13,
+          bool completion_transport = false) -> tuple<Stream, Stream> {
   auto sockets = tcp_pair(runtime);
   auto pending = [&] {
     Parameters a, b;
@@ -44,6 +75,10 @@ auto pair(async::Runtime &runtime, usize capacity = usize(64),
         Connector(Context::client(trust(), rstd::move(a)).unwrap(), options);
     auto acceptor =
         Acceptor(Context::server(identity, rstd::move(b)).unwrap(), options);
+    if (completion_transport)
+      return tuple{connector.connect(fragmented(rstd::move(sockets.get<0>())),
+                                     ServerName::dns("localhost"_str).unwrap()),
+                   acceptor.accept(fragmented(rstd::move(sockets.get<1>())))};
     return tuple{connector.connect(rstd::move(sockets.get<0>()),
                                    ServerName::dns("localhost"_str).unwrap()),
                  acceptor.accept(rstd::move(sockets.get<1>()))};
@@ -83,6 +118,26 @@ void close_pair(async::Runtime &runtime, tuple<Stream, Stream> streams) {
   EXPECT_TRUE(closed.get<1>().is_ok());
 }
 } // namespace
+TEST(TlsStream, CompletionTransportHandlesPartialWritesAndCloseBarrier) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto streams = pair(runtime, usize(64), {}, Version::Tls13, true);
+  EXPECT_EQ(runtime
+                .block_on(streams.get<0>().send_all(
+                    Bytes::copy_from_slice("logical stream request"_bytes)))
+                .unwrap(),
+            usize(22));
+  EXPECT_EQ(runtime.block_on(consume(streams.get<1>(), usize(22))).as_slice(),
+            "logical stream request"_bytes);
+  EXPECT_EQ(runtime
+                .block_on(streams.get<1>().send_all(
+                    Bytes::copy_from_slice("logical stream reply"_bytes)))
+                .unwrap(),
+            usize(20));
+  EXPECT_EQ(runtime.block_on(consume(streams.get<0>(), usize(20))).as_slice(),
+            "logical stream reply"_bytes);
+  close_pair(runtime, rstd::move(streams));
+}
 TEST(TlsStream, PendingReadDoesNotBlockWriteAndFactoriesOwnConfiguration) {
   auto runtime =
       async::RuntimeBuilder::current_thread().enable_all().build().unwrap();

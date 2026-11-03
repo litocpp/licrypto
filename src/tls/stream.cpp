@@ -166,7 +166,7 @@ class ConnectionDriver {
   using Send = rstd::async::coro<rstd::io::Result<usize>>::Future;
   using Close = rstd::async::coro<rstd::io::Result<empty>>::Future;
   Arc<SharedConnection> shared_;
-  rstd::net::TcpStream transport_;
+  rstd::async::io::Stream transport_;
   Session session_;
   StreamOptions options_;
   Option<Receive> receiving_;
@@ -554,8 +554,9 @@ class ConnectionDriver {
 
 public:
   using Output = empty;
-  ConnectionDriver(Arc<SharedConnection> shared, rstd::net::TcpStream transport,
-                   Session session, StreamOptions options)
+  ConnectionDriver(Arc<SharedConnection> shared,
+                   rstd::async::io::Stream transport, Session session,
+                   StreamOptions options)
       : shared_(rstd::move(shared)), transport_(rstd::move(transport)),
         session_(rstd::move(session)), options_(options),
         deadline_(Some(rstd::async::sleep(options.handshake_timeout))) {}
@@ -573,7 +574,7 @@ Stream::Stream(Stream &&) noexcept = default;
 auto Stream::operator=(Stream &&) noexcept -> Stream & = default;
 Stream::~Stream() = default;
 
-auto make_owner(rstd::net::TcpStream transport, Session session,
+auto make_owner(rstd::async::io::Stream transport, Session session,
                 StreamOptions options) -> Arc<ConnectionOwner> {
   auto handshake = Arc<SimpleRequest>::make();
   auto shared = Arc<SharedConnection>::make(handshake.clone());
@@ -581,7 +582,8 @@ auto make_owner(rstd::net::TcpStream transport, Session session,
       shared.clone(), rstd::move(transport), rstd::move(session), options));
   return Arc<ConnectionOwner>::make(rstd::move(shared), rstd::move(task));
 }
-auto Connector::connect_owned(Context context, rstd::net::TcpStream transport,
+auto Connector::connect_owned(Context context,
+                              rstd::async::io::Stream transport,
                               ServerName name, StreamOptions options)
     -> rstd::async::coro<CryptoResult<Stream>> {
   if (options.maximum_buffered_plaintext == usize() ||
@@ -606,7 +608,7 @@ auto Connector::connect_owned(Context context, rstd::net::TcpStream transport,
     co_return Err(rstd::move(ready).unwrap_err());
   co_return Ok(Stream(rstd::move(owner)));
 }
-auto Acceptor::accept_owned(Context context, rstd::net::TcpStream transport,
+auto Acceptor::accept_owned(Context context, rstd::async::io::Stream transport,
                             StreamOptions options)
     -> rstd::async::coro<CryptoResult<Stream>> {
   if (options.maximum_buffered_plaintext == usize() ||
@@ -630,6 +632,35 @@ auto Acceptor::accept_owned(Context context, rstd::net::TcpStream transport,
   if (ready.is_err())
     co_return Err(rstd::move(ready).unwrap_err());
   co_return Ok(Stream(rstd::move(owner)));
+}
+auto Connector::connect_owned(Context context, rstd::net::TcpStream transport,
+                              ServerName name, StreamOptions options)
+    -> rstd::async::coro<CryptoResult<Stream>> {
+  auto adapted = rstd::net::as_stream(rstd::move(transport));
+  if (adapted.is_err())
+    co_return Err(Error::Io(rstd::move(adapted).unwrap_err()));
+  co_return co_await connect_owned(rstd::move(context),
+                                   rstd::move(adapted).unwrap(),
+                                   rstd::move(name), options);
+}
+auto Acceptor::accept_owned(Context context, rstd::net::TcpStream transport,
+                            StreamOptions options)
+    -> rstd::async::coro<CryptoResult<Stream>> {
+  auto adapted = rstd::net::as_stream(rstd::move(transport));
+  if (adapted.is_err())
+    co_return Err(Error::Io(rstd::move(adapted).unwrap_err()));
+  co_return co_await accept_owned(rstd::move(context),
+                                  rstd::move(adapted).unwrap(), options);
+}
+auto Connector::connect(rstd::async::io::Stream transport,
+                        ServerName peer) const
+    -> rstd::async::coro<CryptoResult<Stream>> {
+  return connect_owned(context_.clone(), rstd::move(transport),
+                       rstd::move(peer), options_);
+}
+auto Acceptor::accept(rstd::async::io::Stream transport) const
+    -> rstd::async::coro<CryptoResult<Stream>> {
+  return accept_owned(context_.clone(), rstd::move(transport), options_);
 }
 auto Connector::connect(rstd::net::TcpStream transport, ServerName peer) const
     -> rstd::async::coro<CryptoResult<Stream>> {

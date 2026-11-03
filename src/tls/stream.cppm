@@ -48,11 +48,16 @@ class Connector {
   static auto connect_owned(Context context, rstd::net::TcpStream transport,
                             ServerName peer, StreamOptions options)
       -> rstd::async::coro<CryptoResult<Stream>>;
+  static auto connect_owned(Context context, rstd::async::io::Stream transport,
+                            ServerName peer, StreamOptions options)
+      -> rstd::async::coro<CryptoResult<Stream>>;
 
 public:
   explicit Connector(Context context, StreamOptions options = {})
       : context_(rstd::move(context)), options_(options) {}
   auto connect(rstd::net::TcpStream transport, ServerName peer) const
+      -> rstd::async::coro<CryptoResult<Stream>>;
+  auto connect(rstd::async::io::Stream transport, ServerName peer) const
       -> rstd::async::coro<CryptoResult<Stream>>;
 };
 class Acceptor {
@@ -61,11 +66,16 @@ class Acceptor {
   static auto accept_owned(Context context, rstd::net::TcpStream transport,
                            StreamOptions options)
       -> rstd::async::coro<CryptoResult<Stream>>;
+  static auto accept_owned(Context context, rstd::async::io::Stream transport,
+                           StreamOptions options)
+      -> rstd::async::coro<CryptoResult<Stream>>;
 
 public:
   explicit Acceptor(Context context, StreamOptions options = {})
       : context_(rstd::move(context)), options_(options) {}
   auto accept(rstd::net::TcpStream transport) const
+      -> rstd::async::coro<CryptoResult<Stream>>;
+  auto accept(rstd::async::io::Stream transport) const
       -> rstd::async::coro<CryptoResult<Stream>>;
 };
 } // namespace licrypto::tls
