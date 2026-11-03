@@ -10,8 +10,20 @@ using bytes::Bytes;
 using namespace licrypto;
 using namespace licrypto::tls;
 
+struct TlsTransportFaults {
+  bool armed{};
+};
 struct FragmentedTlsTransport {
   rstd::async::io::Stream stream;
+  Option<sync::Arc<sync::Mutex<TlsTransportFaults>>> faults;
+  auto send(Bytes input) const -> async::coro<rstd::io::Result<usize>> {
+    if (faults && (*faults)->lock().unwrap()->armed) {
+      co_await async::sleep(time::Duration::from_millis(u64(20)));
+      co_return Err(rstd::io::Error::from_raw_os_error(i32(32)));
+    }
+    auto count = input.len() < usize(13) ? input.len() : usize(13);
+    co_return co_await stream.send(input.slice(usize(), count));
+  }
 };
 template <>
 struct rstd::Impl<rstd::async::io::CompletionStream, FragmentedTlsTransport>
@@ -21,8 +33,7 @@ struct rstd::Impl<rstd::async::io::CompletionStream, FragmentedTlsTransport>
     return self().stream.recv_into(rstd::move(buffer));
   }
   auto send(Bytes input) const -> async::coro<rstd::io::Result<usize>> {
-    auto count = input.len() < usize(13) ? input.len() : usize(13);
-    return self().stream.send(input.slice(usize(), count));
+    return self().send(rstd::move(input));
   }
   auto flush() const -> async::coro<rstd::io::Result<empty>> {
     return self().stream.flush();
@@ -31,14 +42,25 @@ struct rstd::Impl<rstd::async::io::CompletionStream, FragmentedTlsTransport>
     return self().stream.shutdown_write();
   }
   void request_stop() const { self().stream.request_stop(); }
-  auto close() const -> async::coro<rstd::io::Result<empty>> {
-    return self().stream.close();
+  auto wait_closed() const -> async::coro<rstd::io::Result<empty>> {
+    return self().stream.wait_closed();
+  }
+  auto take_close_result() const -> Option<rstd::io::Result<empty>> {
+    auto result = self().stream.take_close_result();
+    if (result.is_some() && result->is_ok() && self().faults &&
+        (*self().faults)->lock().unwrap()->armed)
+      return Some(rstd::io::Result<empty>(
+          Err(rstd::io::Error::from_raw_os_error(i32(5)))));
+    return result;
   }
 };
 namespace {
-auto fragmented(net::TcpStream transport) -> rstd::async::io::Stream {
+auto fragmented(net::TcpStream transport,
+                Option<sync::Arc<sync::Mutex<TlsTransportFaults>>> faults = {})
+    -> rstd::async::io::Stream {
   auto backend = sync::Arc<rstd::dyn<async::io::CompletionStream>>::make(
-      FragmentedTlsTransport{net::as_stream(rstd::move(transport)).unwrap()});
+      FragmentedTlsTransport{net::as_stream(rstd::move(transport)).unwrap(),
+                             rstd::move(faults)});
   return async::io::Stream(rstd::move(backend));
 }
 auto trust() -> Trust {
@@ -60,7 +82,9 @@ auto tcp_pair(async::Runtime &runtime)
 }
 auto pair(async::Runtime &runtime, usize capacity = usize(64),
           StreamOptions options = {}, Version version = Version::Tls13,
-          bool completion_transport = false) -> tuple<Stream, Stream> {
+          bool completion_transport = false,
+          Option<sync::Arc<sync::Mutex<TlsTransportFaults>>> faults = {})
+    -> tuple<Stream, Stream> {
   auto sockets = tcp_pair(runtime);
   auto pending = [&] {
     Parameters a, b;
@@ -75,8 +99,9 @@ auto pair(async::Runtime &runtime, usize capacity = usize(64),
         Connector(Context::client(trust(), rstd::move(a)).unwrap(), options);
     auto acceptor =
         Acceptor(Context::server(identity, rstd::move(b)).unwrap(), options);
-    if (completion_transport)
-      return tuple{connector.connect(fragmented(rstd::move(sockets.get<0>())),
+    if (completion_transport || faults)
+      return tuple{connector.connect(fragmented(rstd::move(sockets.get<0>()),
+                                                rstd::move(faults)),
                                      ServerName::dns("localhost"_str).unwrap()),
                    acceptor.accept(fragmented(rstd::move(sockets.get<1>())))};
     return tuple{connector.connect(rstd::move(sockets.get<0>()),
@@ -478,5 +503,95 @@ TEST(TlsStream, CloseAfterFailedReadReportsTheCompletedResourceRelease) {
   ASSERT_TRUE(read.is_err());
   EXPECT_TRUE(read.unwrap_err().is_UnexpectedEof());
   EXPECT_TRUE(runtime.block_on(rstd::move(client).close()).is_ok());
+}
+TEST(TlsStream,
+     FlushOwnsWriteFailureAndCancellationRetainsItAlongsideCloseFailure) {
+  for (bool cancel : array<bool, 2>{false, true}) {
+    auto runtime =
+        async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+    auto faults =
+        sync::Arc<sync::Mutex<TlsTransportFaults>>::make(TlsTransportFaults{});
+    auto streams = pair(runtime, usize(4096), {}, Version::Tls13, true,
+                        Some(faults.clone()));
+    faults->lock().unwrap()->armed = true;
+    auto &client = streams.get<0>();
+    EXPECT_TRUE(
+        runtime.block_on(client.send(Bytes::copy_from_slice("payload"_bytes)))
+            .is_ok());
+    auto reading = client.recv().into_future();
+    if (cancel) {
+      auto waiting = runtime.block_on(async::timeout(
+          client.flush().into_future(), time::Duration::from_millis(u64(1))));
+      EXPECT_TRUE(waiting.is_err());
+    } else {
+      auto failed = runtime.block_on(client.flush());
+      ASSERT_TRUE(failed.is_err());
+      ASSERT_TRUE(failed.as_ref().unwrap_err().is_Io());
+      EXPECT_EQ(failed.as_ref().unwrap_err().as_Io().cause.raw_os_error(),
+                Some(i32(32)));
+    }
+    auto read = runtime.block_on(rstd::move(reading));
+    ASSERT_TRUE(read.is_err());
+    EXPECT_TRUE(read.as_ref().unwrap_err().is_Closed());
+    auto retained = client.take_error();
+    EXPECT_EQ(retained.is_some(), cancel);
+    if (retained.is_some()) {
+      ASSERT_TRUE(retained->is_Io());
+      EXPECT_EQ(retained->as_Io().cause.raw_os_error(), Some(i32(32)));
+    }
+    EXPECT_TRUE(client.take_error().is_none());
+    auto closed = runtime.block_on(client.close());
+    ASSERT_TRUE(closed.is_err());
+    ASSERT_TRUE(closed.as_ref().unwrap_err().is_Io());
+    EXPECT_EQ(closed.as_ref().unwrap_err().as_Io().cause.raw_os_error(),
+              Some(i32(5)));
+    EXPECT_TRUE(client.take_close_error().is_none());
+    EXPECT_TRUE(
+        runtime.block_on(client.close()).unwrap_err().is_InvalidState());
+    (void)runtime.block_on(streams.get<1>().close(CloseMode::SendOnly));
+  }
+}
+TEST(TlsStream, FailedHandshakeRetainsIndependentTransportCleanupFailure) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto sockets = tcp_pair(runtime);
+  auto faults = sync::Arc<sync::Mutex<TlsTransportFaults>>::make(
+      TlsTransportFaults{true});
+  Connector connector(Context::client(trust()).unwrap());
+  auto result = runtime.block_on(connector.connect(
+      fragmented(rstd::move(sockets.get<0>()), Some(faults.clone())),
+      ServerName::dns("localhost"_str).unwrap()));
+  ASSERT_TRUE(result.is_err());
+  auto error = rstd::move(result).unwrap_err();
+  ASSERT_TRUE(error.is_Multiple());
+  auto &errors = error.as_Multiple().errors;
+  ASSERT_EQ(errors.len(), usize(2));
+  ASSERT_TRUE(errors[usize()].is_Io());
+  EXPECT_EQ(errors[usize()].as_Io().cause.raw_os_error(), Some(i32(32)));
+  ASSERT_TRUE(errors[usize(1)].is_Io());
+  EXPECT_EQ(errors[usize(1)].as_Io().cause.raw_os_error(), Some(i32(5)));
+  EXPECT_TRUE(runtime.block_on(rstd::move(sockets.get<1>()).close()).is_ok());
+}
+TEST(TlsStream, CanceledReadDoesNotConsumeTerminalError) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto client = [&] {
+    auto streams = pair(runtime);
+    return rstd::move(streams.get<0>());
+  }();
+  {
+    auto canceled = client.recv();
+  }
+  auto first = runtime.block_on(client.recv());
+  ASSERT_TRUE(first.is_err());
+  EXPECT_TRUE(first.unwrap_err().is_UnexpectedEof());
+  auto second = runtime.block_on(client.recv());
+  ASSERT_TRUE(second.is_err());
+  EXPECT_TRUE(second.unwrap_err().is_Closed());
+  EXPECT_TRUE(client.take_error().is_none());
+  EXPECT_TRUE(runtime.block_on(client.close()).is_ok());
+  auto repeated = runtime.block_on(client.close());
+  ASSERT_TRUE(repeated.is_err());
+  EXPECT_TRUE(repeated.unwrap_err().is_InvalidState());
 }
 #endif

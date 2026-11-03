@@ -37,8 +37,12 @@ public:
   // discards input; WaitPeer also drains trailing input through the peer's
   // close_notify. An earlier operation error is not replayed as a release
   // failure.
-  auto close(CloseMode mode = CloseMode::WaitPeer)
-      && -> rstd::async::coro<CryptoResult<empty>>;
+  auto close(CloseMode mode = CloseMode::WaitPeer) const
+      -> rstd::async::coro<CryptoResult<empty>>;
+  // Unclaimed failures stay with the connection when their operation is
+  // canceled.
+  auto take_error() -> Option<Error>;
+  auto take_close_error() -> Option<Error>;
   auto application_protocol() const -> CryptoResult<rstd::bytes::Bytes>;
   auto negotiated_version() const -> CryptoResult<Version>;
 };

@@ -29,33 +29,8 @@ class Error {
             (Configuration, (String message;)),
             (Verification, (i64 code; String message;)),
             (Protocol, (String message;)), (Io, (rstd::io::Error cause;)),
-            (UnexpectedEof, ()), (Closed, ()), (Busy, ()), (Timeout, ()))
-
-public:
-  auto clone() const -> Error {
-    if (is_Backend())
-      return Backend(as_Backend().failure.clone());
-    if (is_AlgorithmUnavailable())
-      return AlgorithmUnavailable(as_AlgorithmUnavailable().failure.clone());
-    if (is_InvalidState())
-      return InvalidState(as_InvalidState().operation.clone());
-    if (is_Configuration())
-      return Configuration(as_Configuration().message.clone());
-    if (is_Verification())
-      return Verification(as_Verification().code,
-                          as_Verification().message.clone());
-    if (is_Protocol())
-      return Protocol(as_Protocol().message.clone());
-    if (is_Io())
-      return Io(as_Io().cause);
-    if (is_UnexpectedEof())
-      return UnexpectedEof();
-    if (is_Busy())
-      return Busy();
-    if (is_Timeout())
-      return Timeout();
-    return Closed();
-  }
+            (Multiple, (Vec<Error> errors;)), (UnexpectedEof, ()), (Closed, ()),
+            (Busy, ()), (Timeout, ()))
 };
 
 template <class T> using CryptoResult = Result<T, Error>;
@@ -67,6 +42,17 @@ template <>
 struct Impl<fmt::Display, licrypto::Error> : ImplBase<licrypto::Error> {
   auto fmt(fmt::Formatter &f) const -> bool {
     const auto &e = this->self();
+    if (e.is_Multiple()) {
+      bool first = true;
+      for (const auto &error : e.as_Multiple().errors) {
+        if (!first && !f.write_str("; "_str))
+          return false;
+        if (!f.write_fmt(fmt::Arguments::make("{}", error)))
+          return false;
+        first = false;
+      }
+      return true;
+    }
     if (e.is_Backend() || e.is_AlgorithmUnavailable()) {
       const auto &d = e.is_Backend() ? e.as_Backend().failure
                                      : e.as_AlgorithmUnavailable().failure;

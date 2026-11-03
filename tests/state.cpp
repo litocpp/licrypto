@@ -4,6 +4,42 @@ import rstd;
 using namespace rstd::prelude;
 using namespace rstd::literals;
 
+TEST(CryptoState, IoErrorMovePreservesOwnedPayloadAndNativeCode) {
+  auto copied = [] {
+    auto original = licrypto::Error::Io(rstd::io::Error::with_source(
+        rstd::io::ErrorKind{rstd::io::ErrorKind::TimedOut},
+        Box<rstd::dyn<rstd::error::Error>>::make(
+            licrypto::Error::Protocol("owned failure"_Str))));
+    return original;
+  }();
+  auto source =
+      rstd::dyn<rstd::error::Error>::from_ref(copied)->source().unwrap();
+  auto io = rstd::error::downcast_ref<rstd::io::Error>(source);
+  ASSERT_TRUE(io.is_some());
+  EXPECT_EQ((*io)->kind(), rstd::io::ErrorKind{rstd::io::ErrorKind::TimedOut});
+  auto payload =
+      rstd::error::downcast_ref<licrypto::Error>((*io)->get_ref().unwrap());
+  ASSERT_TRUE(payload.is_some());
+  ASSERT_TRUE((*payload)->is_Protocol());
+  EXPECT_EQ((*payload)->as_Protocol().message.as_str(), "owned failure"_str);
+  EXPECT_TRUE(
+      rstd::dyn<rstd::error::Error>::from_ref(**io)->source().is_none());
+  EXPECT_EQ(rstd::format("{}", copied),
+            "TLS protocol error: owned failure"_str);
+
+  auto native = [] {
+    auto original =
+        licrypto::Error::Io(rstd::io::Error::from_raw_os_error(i32::MIN));
+    return original;
+  }();
+  auto native_source =
+      rstd::dyn<rstd::error::Error>::from_ref(native)->source().unwrap();
+  auto native_io = rstd::error::downcast_ref<rstd::io::Error>(native_source);
+  ASSERT_TRUE(native_io.is_some());
+  EXPECT_EQ((*native_io)->raw_os_error().unwrap(), i32::MIN);
+  EXPECT_TRUE((*native_io)->get_ref().is_none());
+}
+
 TEST(CryptoState, ConsumedStateCannotProduceAnotherDigest) {
   auto state = licrypto::Sha256::make().unwrap();
   ASSERT_TRUE(state.update("abc"_str.as_bytes()).is_ok());

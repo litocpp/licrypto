@@ -9,6 +9,8 @@ using rstd::bytes::Bytes;
 using rstd::sync::Arc;
 namespace licrypto::tls {
 
+enum class FailureTarget { Handshake, Read, Write, Flush, Close };
+
 template <class T, class Input = empty> struct Request {
   using Value = T;
   struct Reply {
@@ -18,9 +20,10 @@ template <class T, class Input = empty> struct Request {
     bool consumed = false;
   };
   Input input;
+  FailureTarget target;
   rstd::sync::Mutex<Reply> reply;
-  explicit Request(Input input = {})
-      : input(rstd::move(input)), reply(Reply{}) {}
+  explicit Request(Input input = {}, FailureTarget target = FailureTarget::Read)
+      : input(rstd::move(input)), target(target), reply(Reply{}) {}
   auto canceled() const -> bool {
     auto state = reply.lock().unwrap();
     return state->canceled;
@@ -70,6 +73,10 @@ struct WriteInput {
 using ReadRequest = Request<Bytes, ReadInput>;
 using WriteRequest = Request<usize, WriteInput>;
 using SimpleRequest = Request<empty>;
+struct OperationFailure {
+  FailureTarget target;
+  Error error;
+};
 struct Commands {
   Option<Arc<ReadRequest>> read;
   Option<Arc<WriteRequest>> write;
@@ -79,6 +86,8 @@ struct Commands {
   Option<rstd::task::Waker> driver_waker;
   Option<Error> error;
   Option<Error> close_error;
+  Vec<OperationFailure> other_errors;
+  FailureTarget error_target = FailureTarget::Read;
   Bytes protocol;
   Version version = Version::Tls12;
   bool ready = false;
@@ -86,9 +95,44 @@ struct Commands {
   bool closing = false;
   bool abort = false;
   bool closed = false;
+  bool close_taken = false;
   explicit Commands(Arc<SimpleRequest> handshake)
       : handshake(rstd::move(handshake)) {}
 };
+auto take_operation_error(Commands &state, FailureTarget target) -> Error {
+  if (target == FailureTarget::Close && state.close_error)
+    return state.close_error.take().unwrap();
+  if (state.error && state.error_target == target)
+    return state.error.take().unwrap();
+  for (usize i; i < state.other_errors.len(); ++i)
+    if (state.other_errors[i].target == target)
+      return rstd::move(state.other_errors.remove(i).error);
+  return Error::Closed();
+}
+auto has_operation_error(const Commands &state, FailureTarget target) -> bool {
+  if (target == FailureTarget::Close && state.close_error)
+    return true;
+  if (state.error && state.error_target == target)
+    return true;
+  for (const auto &failure : state.other_errors)
+    if (failure.target == target)
+      return true;
+  return false;
+}
+auto failed_connection(Commands &state, Error primary) -> Error {
+  Vec<Error> errors;
+  errors.push(rstd::move(primary));
+  if (state.error)
+    errors.push(state.error.take().unwrap());
+  for (auto &failure : state.other_errors)
+    errors.push(rstd::move(failure.error));
+  state.other_errors.clear();
+  if (state.close_error)
+    errors.push(state.close_error.take().unwrap());
+  if (errors.len() == usize(1))
+    return errors.remove(usize());
+  return Error::Multiple(rstd::move(errors));
+}
 struct SharedConnection {
   rstd::sync::Mutex<Commands> commands;
   explicit SharedConnection(Arc<SimpleRequest> handshake)
@@ -146,6 +190,17 @@ public:
     if (out.is_ready()) {
       self->active_ = false;
       self->owner_->shared->wake_driver();
+      auto result = rstd::move(out).take();
+      if (self->request_->target == FailureTarget::Close) {
+        auto state = self->owner_->shared->commands.lock().unwrap();
+        state->close_taken = true;
+      }
+      if (result.is_err() && result.as_ref().unwrap_err().is_Closed()) {
+        auto state = self->owner_->shared->commands.lock().unwrap();
+        return rstd::task::Poll<Output>::Ready(
+            Err(take_operation_error(*state, self->request_->target)));
+      }
+      return rstd::task::Poll<Output>::Ready(rstd::move(result));
     }
     return out;
   }
@@ -159,6 +214,22 @@ template <class T>
 auto ready_result(CryptoResult<T> result)
     -> rstd::async::coro<CryptoResult<T>> {
   co_return rstd::move(result);
+}
+template <class T>
+auto failed_operation(Arc<ConnectionOwner> owner, FailureTarget target)
+    -> rstd::async::coro<CryptoResult<T>> {
+  auto state = owner->shared->commands.lock().unwrap();
+  co_return Err(take_operation_error(*state, target));
+}
+auto closed_result(Arc<ConnectionOwner> owner)
+    -> rstd::async::coro<CryptoResult<empty>> {
+  auto state = owner->shared->commands.lock().unwrap();
+  if (state->close_taken)
+    co_return Err(Error::InvalidState("close result already taken"_Str));
+  state->close_taken = true;
+  if (has_operation_error(*state, FailureTarget::Close))
+    co_return Err(take_operation_error(*state, FailureTarget::Close));
+  co_return Ok(empty{});
 }
 
 class ConnectionDriver {
@@ -174,6 +245,9 @@ class ConnectionDriver {
   Option<Close> closing_transport_;
   Option<rstd::async::Sleep> deadline_;
   Option<Error> error_;
+  Vec<OperationFailure> other_errors_;
+  FailureTarget error_target_ = FailureTarget::Read;
+  FailureTarget output_target_ = FailureTarget::Write;
   Bytes input_;
   Bytes output_;
   Option<Bytes> plaintext_;
@@ -186,9 +260,21 @@ class ConnectionDriver {
   bool transport_eof_ = false;
   bool peer_eof_ = false;
 
-  void fail(Error error) {
-    if (!error_)
+  void fail(Error error, FailureTarget target = FailureTarget::Read) {
+    if (!error_) {
+      error_target_ = !ready_ ? FailureTarget::Handshake : target;
       error_ = Some(rstd::move(error));
+    } else
+      other_errors_.push(
+          {!ready_ ? FailureTarget::Handshake : target, rstd::move(error)});
+  }
+  auto write_failure_target() const -> FailureTarget {
+    auto state = shared_->commands.lock().unwrap();
+    if (state->write)
+      return FailureTarget::Write;
+    if (state->flush)
+      return FailureTarget::Flush;
+    return output_target_;
   }
   void begin_transport_close() {
     if (closing_transport_)
@@ -201,11 +287,13 @@ class ConnectionDriver {
     Option<Error> close_error;
     if (closed.is_err()) {
       close_error = Some(Error::Io(rstd::move(closed).unwrap_err()));
-      if (!error_)
-        fail(close_error->clone());
-    } else if (closing_ && error_) {
-      close_error = Some(error_->clone());
     }
+    bool close_failed =
+        close_error.is_some() ||
+        (error_.is_some() && error_target_ == FailureTarget::Close);
+    for (const auto &failure : other_errors_)
+      if (failure.target == FailureTarget::Close)
+        close_failed = true;
     Option<Arc<ReadRequest>> read;
     Option<Arc<WriteRequest>> write;
     Option<Arc<SimpleRequest>> flush, close;
@@ -216,26 +304,26 @@ class ConnectionDriver {
     {
       auto state = shared_->commands.lock().unwrap();
       state->closed = true;
-      if (error_)
-        state->error = Some(error_->clone());
-      if (close_error)
-        state->close_error = Some(close_error->clone());
+      state->error = error_.take();
+      state->error_target = error_target_;
+      state->other_errors = rstd::move(other_errors_);
+      state->close_error = rstd::move(close_error);
       state->driver_waker = None();
       read = state->read.take();
       write = state->write.take();
       flush = state->flush.take();
       close = state->close.take();
     }
-    handshake->complete(Err(error_ ? error_->clone() : Error::Closed()));
+    handshake->complete(Err(Error::Closed()));
     if (read)
-      (*read)->complete(Err(error_ ? error_->clone() : Error::Closed()));
+      (*read)->complete(Err(Error::Closed()));
     if (write)
-      (*write)->complete(Err(error_ ? error_->clone() : Error::Closed()));
+      (*write)->complete(Err(Error::Closed()));
     if (flush)
-      (*flush)->complete(Err(error_ ? error_->clone() : Error::Closed()));
+      (*flush)->complete(Err(Error::Closed()));
     if (close)
-      (*close)->complete(close_error
-                             ? CryptoResult<empty>(Err(close_error->clone()))
+      (*close)->complete(close_failed
+                             ? CryptoResult<empty>(Err(Error::Closed()))
                              : CryptoResult<empty>(Ok(empty{})));
     return rstd::task::Poll<empty>::Ready(empty{});
   }
@@ -288,7 +376,8 @@ class ConnectionDriver {
         auto timed = rstd::future::poll(*deadline_, cx);
         if (timed.is_ready()) {
           deadline_ = None();
-          fail(Error::Timeout());
+          fail(Error::Timeout(),
+               closing_ ? FailureTarget::Close : FailureTarget::Handshake);
         }
       }
       if (error_)
@@ -329,10 +418,12 @@ class ConnectionDriver {
           changed = true;
           auto result = rstd::move(sent).take();
           if (result.is_err())
-            fail(Error::Io(rstd::move(result).unwrap_err()));
+            fail(Error::Io(rstd::move(result).unwrap_err()),
+                 write_failure_target());
           else if (*result == usize() || *result > output_.len())
             fail(Error::Io(rstd::io::Error::from_kind(
-                rstd::io::ErrorKind{rstd::io::ErrorKind::WriteZero})));
+                     rstd::io::ErrorKind{rstd::io::ErrorKind::WriteZero})),
+                 write_failure_target());
           else
             output_.advance(*result);
         }
@@ -404,9 +495,10 @@ class ConnectionDriver {
             changed = true;
           } else {
             if (!input.started) {
+              output_target_ = FailureTarget::Write;
               auto started = session_.start_write(input.data.clone());
               if (started.is_err()) {
-                fail(rstd::move(started).unwrap_err());
+                fail(rstd::move(started).unwrap_err(), FailureTarget::Write);
                 continue;
               }
               input.started = true;
@@ -414,7 +506,7 @@ class ConnectionDriver {
             }
             auto written = session_.write();
             if (written.is_err()) {
-              fail(rstd::move(written).unwrap_err());
+              fail(rstd::move(written).unwrap_err(), FailureTarget::Write);
               continue;
             }
             if (written->is_some()) {
@@ -497,7 +589,7 @@ class ConnectionDriver {
             // completing the peer's close_notify exchange.
             auto trailing = session_.read(options_.maximum_buffered_plaintext);
             if (trailing.is_err()) {
-              fail(rstd::move(trailing).unwrap_err());
+              fail(rstd::move(trailing).unwrap_err(), FailureTarget::Close);
               continue;
             }
             if (trailing->is_some())
@@ -507,8 +599,9 @@ class ConnectionDriver {
           if (close_mode_ == CloseMode::SendOnly || !progress.local_closed ||
               progress.peer_closed) {
             auto closed = session_.shutdown(close_mode_);
+            output_target_ = FailureTarget::Close;
             if (closed.is_err()) {
-              fail(rstd::move(closed).unwrap_err());
+              fail(rstd::move(closed).unwrap_err(), FailureTarget::Close);
               continue;
             }
             tls_closed_ = *closed;
@@ -521,7 +614,7 @@ class ConnectionDriver {
           progress.pending_output != usize()) {
         auto output = session_.drain();
         if (output.is_err()) {
-          fail(rstd::move(output).unwrap_err());
+          fail(rstd::move(output).unwrap_err(), write_failure_target());
           continue;
         }
         output_ = rstd::move(output).unwrap();
@@ -576,11 +669,21 @@ Stream::~Stream() = default;
 
 auto make_owner(rstd::async::io::Stream transport, Session session,
                 StreamOptions options) -> Arc<ConnectionOwner> {
-  auto handshake = Arc<SimpleRequest>::make();
+  auto handshake = Arc<SimpleRequest>::make(empty{}, FailureTarget::Handshake);
   auto shared = Arc<SharedConnection>::make(handshake.clone());
   auto task = rstd::async::spawn(ConnectionDriver(
       shared.clone(), rstd::move(transport), rstd::move(session), options));
   return Arc<ConnectionOwner>::make(rstd::move(shared), rstd::move(task));
+}
+auto close_failed_transport(rstd::async::io::Stream transport, Error primary)
+    -> rstd::async::coro<Error> {
+  auto closed = co_await transport.close();
+  if (closed.is_ok())
+    co_return rstd::move(primary);
+  Vec<Error> errors;
+  errors.push(rstd::move(primary));
+  errors.push(Error::Io(rstd::move(closed).unwrap_err()));
+  co_return Error::Multiple(rstd::move(errors));
 }
 auto Connector::connect_owned(Context context,
                               rstd::async::io::Stream transport,
@@ -588,13 +691,14 @@ auto Connector::connect_owned(Context context,
     -> rstd::async::coro<CryptoResult<Stream>> {
   if (options.maximum_buffered_plaintext == usize() ||
       options.maximum_buffered_plaintext > usize(1048576)) {
-    (void)co_await rstd::move(transport).close();
-    co_return Err(Error::Configuration("invalid plaintext buffer limit"_Str));
+    co_return Err(co_await close_failed_transport(
+        rstd::move(transport),
+        Error::Configuration("invalid plaintext buffer limit"_Str)));
   }
   auto session = Session::client(context, rstd::move(name));
   if (session.is_err()) {
-    (void)co_await rstd::move(transport).close();
-    co_return Err(rstd::move(session).unwrap_err());
+    co_return Err(co_await close_failed_transport(
+        rstd::move(transport), rstd::move(session).unwrap_err()));
   }
   auto owner =
       make_owner(rstd::move(transport), rstd::move(session).unwrap(), options);
@@ -604,8 +708,10 @@ auto Connector::connect_owned(Context context,
   }();
   auto ready = co_await WaitRequest<SimpleRequest>(owner.clone(),
                                                    rstd::move(reply), true);
-  if (ready.is_err())
-    co_return Err(rstd::move(ready).unwrap_err());
+  if (ready.is_err()) {
+    auto state = owner->shared->commands.lock().unwrap();
+    co_return Err(failed_connection(*state, rstd::move(ready).unwrap_err()));
+  }
   co_return Ok(Stream(rstd::move(owner)));
 }
 auto Acceptor::accept_owned(Context context, rstd::async::io::Stream transport,
@@ -613,13 +719,14 @@ auto Acceptor::accept_owned(Context context, rstd::async::io::Stream transport,
     -> rstd::async::coro<CryptoResult<Stream>> {
   if (options.maximum_buffered_plaintext == usize() ||
       options.maximum_buffered_plaintext > usize(1048576)) {
-    (void)co_await rstd::move(transport).close();
-    co_return Err(Error::Configuration("invalid plaintext buffer limit"_Str));
+    co_return Err(co_await close_failed_transport(
+        rstd::move(transport),
+        Error::Configuration("invalid plaintext buffer limit"_Str)));
   }
   auto session = Session::server(context);
   if (session.is_err()) {
-    (void)co_await rstd::move(transport).close();
-    co_return Err(rstd::move(session).unwrap_err());
+    co_return Err(co_await close_failed_transport(
+        rstd::move(transport), rstd::move(session).unwrap_err()));
   }
   auto owner =
       make_owner(rstd::move(transport), rstd::move(session).unwrap(), options);
@@ -629,8 +736,10 @@ auto Acceptor::accept_owned(Context context, rstd::async::io::Stream transport,
   }();
   auto ready = co_await WaitRequest<SimpleRequest>(owner.clone(),
                                                    rstd::move(reply), true);
-  if (ready.is_err())
-    co_return Err(rstd::move(ready).unwrap_err());
+  if (ready.is_err()) {
+    auto state = owner->shared->commands.lock().unwrap();
+    co_return Err(failed_connection(*state, rstd::move(ready).unwrap_err()));
+  }
   co_return Ok(Stream(rstd::move(owner)));
 }
 auto Connector::connect_owned(Context context, rstd::net::TcpStream transport,
@@ -682,8 +791,7 @@ auto Stream::recv(usize maximum_size) const
   {
     auto state = owner_->shared->commands.lock().unwrap();
     if (state->closed)
-      return ready_result<Bytes>(
-          Err(state->error ? state->error->clone() : Error::Closed()));
+      return failed_operation<Bytes>(owner_.clone(), FailureTarget::Read);
     if (state->closing)
       return ready_result<Bytes>(Err(Error::Closed()));
     if (state->read && !(*state->read)->canceled() &&
@@ -697,12 +805,12 @@ auto Stream::recv(usize maximum_size) const
 }
 auto enqueue_write(Arc<ConnectionOwner> owner, Bytes input, bool all)
     -> rstd::async::coro<CryptoResult<usize>> {
-  auto request = Arc<WriteRequest>::make(WriteInput{rstd::move(input), all});
+  auto request = Arc<WriteRequest>::make(WriteInput{rstd::move(input), all},
+                                         FailureTarget::Write);
   {
     auto state = owner->shared->commands.lock().unwrap();
     if (state->closed)
-      return ready_result<usize>(
-          Err(state->error ? state->error->clone() : Error::Closed()));
+      return failed_operation<usize>(owner.clone(), FailureTarget::Write);
     if (state->closing)
       return ready_result<usize>(Err(Error::Closed()));
     if (state->write || state->flush)
@@ -727,12 +835,11 @@ auto Stream::send_all(Bytes input) const
 auto Stream::flush() const -> rstd::async::coro<CryptoResult<empty>> {
   if (!owner_)
     return ready_result<empty>(Err(Error::Closed()));
-  auto request = Arc<SimpleRequest>::make();
+  auto request = Arc<SimpleRequest>::make(empty{}, FailureTarget::Flush);
   {
     auto state = owner_->shared->commands.lock().unwrap();
     if (state->closed)
-      return ready_result<empty>(
-          Err(state->error ? state->error->clone() : Error::Closed()));
+      return failed_operation<empty>(owner_.clone(), FailureTarget::Flush);
     if (state->closing)
       return ready_result<empty>(Err(Error::Closed()));
     if (state->write || state->flush)
@@ -743,19 +850,19 @@ auto Stream::flush() const -> rstd::async::coro<CryptoResult<empty>> {
   return await_request(
       WaitRequest<SimpleRequest>(owner_.clone(), rstd::move(request)));
 }
-auto Stream::close(
-    CloseMode mode) && -> rstd::async::coro<CryptoResult<empty>> {
+auto Stream::close(CloseMode mode) const
+    -> rstd::async::coro<CryptoResult<empty>> {
   if (!owner_)
     return ready_result<empty>(Err(Error::Closed()));
-  auto owner = rstd::move(owner_);
-  auto request = Arc<SimpleRequest>::make();
+  auto owner = owner_.clone();
+  auto request = Arc<SimpleRequest>::make(empty{}, FailureTarget::Close);
   {
     auto state = owner->shared->commands.lock().unwrap();
+    if (state->close && !(*state->close)->canceled() &&
+        !(*state->close)->consumed())
+      return ready_result<empty>(Err(Error::Busy()));
     if (state->closed)
-      return ready_result<empty>(
-          state->close_error
-              ? CryptoResult<empty>(Err(state->close_error->clone()))
-              : CryptoResult<empty>(Ok(empty{})));
+      return closed_result(owner.clone());
     state->closing = true;
     state->close_mode = mode;
     state->close = Some(request.clone());
@@ -763,6 +870,21 @@ auto Stream::close(
   owner->shared->wake_driver();
   return await_request(
       WaitRequest<SimpleRequest>(rstd::move(owner), rstd::move(request), true));
+}
+auto Stream::take_error() -> Option<Error> {
+  if (!owner_)
+    return None();
+  auto state = owner_->shared->commands.lock().unwrap();
+  if (state->error)
+    return state->error.take();
+  if (!state->other_errors.is_empty())
+    return Some(rstd::move(state->other_errors.remove(usize()).error));
+  return None();
+}
+auto Stream::take_close_error() -> Option<Error> {
+  if (!owner_)
+    return None();
+  return owner_->shared->commands.lock().unwrap()->close_error.take();
 }
 auto Stream::application_protocol() const -> CryptoResult<Bytes> {
   if (!owner_)
