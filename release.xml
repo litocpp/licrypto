@@ -1,3 +1,14 @@
+<release version="0.2.1" date="2026-11-04">
+  <description>
+    <ul>
+      <li>Add Crc32Ieee and Adler32 checksums.</li>
+      <li>Fix Sha256 move assignment.</li>
+      <li>Add completion transports to tls::Connector and Acceptor.</li>
+      <li>Give TLS stream failures single ownership.</li>
+      <li>Update rstd to 0.1.11.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.0" date="2026-10-30">
   <description>
     <ul>

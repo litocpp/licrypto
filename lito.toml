@@ -18,10 +18,10 @@ exceptions = false
 rtti = false
 
 [dependencies]
-rstd-std = { version = "0.1.10", pub = true }
+rstd-std = { version = "0.1.11", pub = true }
 
 [dev-dependencies]
-rstd-test = { version = "0.1.10" }
+rstd-test = { version = "0.1.11" }
 
 [features.openssl]
 default = false
