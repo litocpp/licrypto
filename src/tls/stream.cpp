@@ -281,6 +281,7 @@ class ConnectionDriver {
       return;
     receiving_ = None();
     sending_ = None();
+    transport_.request_stop();
     closing_transport_ = Some(rstd::move(transport_).close().into_future());
   }
   auto finish(rstd::io::Result<empty> closed) -> rstd::task::Poll<empty> {
@@ -677,6 +678,7 @@ auto make_owner(rstd::async::io::Stream transport, Session session,
 }
 auto close_failed_transport(rstd::async::io::Stream transport, Error primary)
     -> rstd::async::coro<Error> {
+  transport.request_stop();
   auto closed = co_await transport.close();
   if (closed.is_ok())
     co_return rstd::move(primary);

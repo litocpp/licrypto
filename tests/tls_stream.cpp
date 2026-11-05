@@ -12,6 +12,8 @@ using namespace licrypto::tls;
 
 struct TlsTransportFaults {
   bool armed{};
+  usize stop_requests{};
+  bool stopped_before_wait{};
 };
 struct FragmentedTlsTransport {
   rstd::async::io::Stream stream;
@@ -41,8 +43,16 @@ struct rstd::Impl<rstd::async::io::CompletionStream, FragmentedTlsTransport>
   auto shutdown_write() const -> async::coro<rstd::io::Result<empty>> {
     return self().stream.shutdown_write();
   }
-  void request_stop() const { self().stream.request_stop(); }
+  void request_stop() const {
+    if (self().faults)
+      ++(*self().faults)->lock().unwrap()->stop_requests;
+    self().stream.request_stop();
+  }
   auto wait_closed() const -> async::coro<rstd::io::Result<empty>> {
+    if (self().faults) {
+      auto faults = (*self().faults)->lock().unwrap();
+      faults->stopped_before_wait = faults->stop_requests > usize();
+    }
     return self().stream.wait_closed();
   }
   auto take_close_result() const -> Option<rstd::io::Result<empty>> {
@@ -162,6 +172,35 @@ TEST(TlsStream, CompletionTransportHandlesPartialWritesAndCloseBarrier) {
   EXPECT_EQ(runtime.block_on(consume(streams.get<0>(), usize(20))).as_slice(),
             "logical stream reply"_bytes);
   close_pair(runtime, rstd::move(streams));
+}
+TEST(TlsStream, ClosingRequestsTransportStopBeforeWaitingForRelease) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto faults =
+      sync::Arc<sync::Mutex<TlsTransportFaults>>::make(TlsTransportFaults{});
+  auto streams =
+      pair(runtime, usize(64), {}, Version::Tls13, true, Some(faults.clone()));
+  close_pair(runtime, rstd::move(streams));
+  EXPECT_TRUE(faults->lock().unwrap()->stopped_before_wait);
+}
+TEST(TlsStream, InvalidConfigurationStopsTransportBeforeWaitingForRelease) {
+  auto runtime =
+      async::RuntimeBuilder::current_thread().enable_all().build().unwrap();
+  auto sockets = tcp_pair(runtime);
+  auto faults =
+      sync::Arc<sync::Mutex<TlsTransportFaults>>::make(TlsTransportFaults{});
+  StreamOptions options;
+  options.maximum_buffered_plaintext = usize();
+  auto connector = Connector(Context::client(trust()).unwrap(), options);
+  auto result = runtime.block_on(async::timeout(
+      async::into_future(connector.connect(
+          fragmented(rstd::move(sockets.get<0>()), Some(faults.clone())),
+          ServerName::dns("localhost"_str).unwrap())),
+      time::Duration::from_secs(u64(2))));
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_TRUE(result->is_err());
+  EXPECT_TRUE(faults->lock().unwrap()->stopped_before_wait);
+  runtime.block_on(rstd::move(sockets.get<1>()).close()).unwrap();
 }
 TEST(TlsStream, PendingReadDoesNotBlockWriteAndFactoriesOwnConfiguration) {
   auto runtime =
