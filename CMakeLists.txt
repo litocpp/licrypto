@@ -55,7 +55,9 @@ target_sources(
          src/backend/native/sha1.cppm
          src/backend/native/sha256.cppm
          src/backend/native/sha512.cppm
+         src/adler32.cppm
          src/base64.cppm
+         src/crc32.cppm
          src/error.cppm
          src/hmac_sha256.cppm
          src/lib.cppm
