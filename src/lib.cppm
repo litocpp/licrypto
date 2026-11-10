@@ -12,4 +12,6 @@ export import :sha512;
 
 #if LITO_FEAT_OPENSSL
 export import :tls;
+export import :cipher;
+export import :rsa;
 #endif
