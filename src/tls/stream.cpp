@@ -135,6 +135,7 @@ auto failed_connection(Commands &state, Error primary) -> Error {
 }
 struct SharedConnection {
   rstd::sync::Mutex<Commands> commands;
+  rstd::async::watch::Sender<bool> closed{false};
   explicit SharedConnection(Arc<SimpleRequest> handshake)
       : commands(Commands(rstd::move(handshake))) {}
   void wake_driver() const {
@@ -326,6 +327,7 @@ class ConnectionDriver {
       (*close)->complete(close_failed
                              ? CryptoResult<empty>(Err(Error::Closed()))
                              : CryptoResult<empty>(Ok(empty{})));
+    (void)shared_->closed.send_replace(true);
     return rstd::task::Poll<empty>::Ready(empty{});
   }
   void clear_read(const Arc<ReadRequest> &request) {
@@ -903,5 +905,98 @@ auto Stream::negotiated_version() const -> CryptoResult<Version> {
   if (!state->ready)
     return Err(Error::InvalidState("TLS metadata before handshake"_Str));
   return Ok(state->version);
+}
+
+auto completion_error(Error error) -> rstd::io::Error {
+  return rstd::io::Error::with_source(
+      rstd::io::ErrorKind{rstd::io::ErrorKind::Other},
+      Box<rstd::dyn<rstd::error::Error>>::make(rstd::move(error)));
+}
+template <class T>
+auto completion_result(rstd::async::coro<CryptoResult<T>> operation)
+    -> rstd::async::coro<rstd::io::Result<T>> {
+  auto result = co_await rstd::move(operation);
+  if (result.is_err())
+    co_return Err(completion_error(rstd::move(result).unwrap_err()));
+  co_return Ok(rstd::move(result).unwrap());
+}
+struct CompletionTls {
+  Stream stream;
+  Arc<ConnectionOwner> owner;
+  auto recv_into(rstd::bytes::BytesMut buffer) const
+      -> rstd::async::coro<rstd::async::io::StreamReceive> {
+    buffer.clear();
+    auto result = co_await stream.recv(buffer.capacity());
+    if (result.is_err())
+      co_return rstd::async::io::StreamReceive{
+          Err(completion_error(rstd::move(result).unwrap_err())),
+          rstd::move(buffer)};
+    buffer.extend_from_slice(result->as_slice());
+    co_return rstd::async::io::StreamReceive{Ok(result->len()),
+                                             rstd::move(buffer)};
+  }
+  auto send(Bytes bytes) const -> rstd::async::coro<rstd::io::Result<usize>> {
+    return completion_result(stream.send(rstd::move(bytes)));
+  }
+  auto flush() const -> rstd::async::coro<rstd::io::Result<empty>> {
+    return completion_result(stream.flush());
+  }
+  auto shutdown_write() const -> rstd::async::coro<rstd::io::Result<empty>> {
+    co_return Err(rstd::io::Error::from_kind(
+        rstd::io::ErrorKind{rstd::io::ErrorKind::Unsupported}));
+  }
+  void request_stop() const {
+    {
+      auto state = owner->shared->commands.lock().unwrap();
+      state->abort = true;
+    }
+    owner->shared->wake_driver();
+  }
+  auto wait_closed() const -> rstd::async::coro<rstd::io::Result<empty>> {
+    auto receiver = owner->shared->closed.subscribe();
+    for (;;) {
+      if (*receiver.borrow())
+        co_return Ok(empty{});
+      auto changed = co_await receiver.changed();
+      if (changed.is_err())
+        co_return Err(rstd::io::Error::from_kind(
+            rstd::io::ErrorKind{rstd::io::ErrorKind::BrokenPipe}));
+    }
+  }
+  auto take_close_result() const -> Option<rstd::io::Result<empty>> {
+    auto state = owner->shared->commands.lock().unwrap();
+    if (!state->closed || state->close_taken)
+      return None();
+    state->close_taken = true;
+    if (has_operation_error(*state, FailureTarget::Close))
+      return Some(rstd::io::Result<empty>(Err(completion_error(
+          take_operation_error(*state, FailureTarget::Close)))));
+    return Some(rstd::io::Result<empty>(Ok(empty{})));
+  }
+};
+} // namespace licrypto::tls
+
+namespace rstd {
+template <>
+struct Impl<async::io::CompletionStream, licrypto::tls::CompletionTls>
+    : ImplBase<licrypto::tls::CompletionTls> {
+  auto recv_into(bytes::BytesMut buffer) const {
+    return self().recv_into(rstd::move(buffer));
+  }
+  auto send(bytes::Bytes bytes) const { return self().send(rstd::move(bytes)); }
+  auto flush() const { return self().flush(); }
+  auto shutdown_write() const { return self().shutdown_write(); }
+  void request_stop() const { self().request_stop(); }
+  auto wait_closed() const { return self().wait_closed(); }
+  auto take_close_result() const { return self().take_close_result(); }
+};
+} // namespace rstd
+
+namespace licrypto::tls {
+auto Stream::into_stream() && -> rstd::async::io::Stream {
+  auto owner = owner_.clone();
+  return rstd::async::io::Stream(
+      Arc<rstd::dyn<rstd::async::io::CompletionStream>>::make(
+          CompletionTls{rstd::move(*this), rstd::move(owner)}));
 }
 } // namespace licrypto::tls

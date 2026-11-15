@@ -45,6 +45,7 @@ public:
   auto take_close_error() -> Option<Error>;
   auto application_protocol() const -> CryptoResult<rstd::bytes::Bytes>;
   auto negotiated_version() const -> CryptoResult<Version>;
+  auto into_stream() && -> rstd::async::io::Stream;
 };
 class Connector {
   Context context_;
