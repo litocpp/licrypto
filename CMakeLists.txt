@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.29)
 
 project(
   licrypto
-  VERSION 0.2.1
+  VERSION 0.2.2
   DESCRIPTION "Cryptographic primitives for lito projects"
   LANGUAGES CXX)
 
@@ -35,7 +35,7 @@ if(NOT TARGET rstd.std)
   FetchContent_Declare(
     rstd
     GIT_REPOSITORY https://github.com/litocpp/rstd.git
-    GIT_TAG 1a451ece7fd7bcef8f0a1d919fcf7fbc6e86fa8b)
+    GIT_TAG 886c4b1e5f148796d92b0d3ca460e5a424d10020)
   FetchContent_MakeAvailable(rstd)
 endif()
 
